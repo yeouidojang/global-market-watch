@@ -33,9 +33,71 @@ class DBManager:
         with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
             schema = f.read()
         conn = self._connect()
+
+        # 마이그레이션: importance 컬럼 추가 (테이블이 이미 존재하는 경우)
+        existing = [row[1] for row in conn.execute("PRAGMA table_info(econ_calendar)").fetchall()]
+        if existing:
+            if "importance" not in existing:
+                conn.execute("ALTER TABLE econ_calendar ADD COLUMN importance TEXT DEFAULT 'medium'")
+                conn.commit()
+            if "source_id" not in existing:
+                conn.execute("ALTER TABLE econ_calendar ADD COLUMN source_id TEXT")
+                conn.commit()
+
+            # UNIQUE INDEX 생성 전 중복 레코드 제거
+            conn.execute("""
+                DELETE FROM econ_calendar
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM econ_calendar
+                    GROUP BY event_date, country, indicator
+                )
+            """)
+            conn.commit()
+
         conn.executescript(schema)
         conn.commit()
+
+        # eps_cache JSON → DB 마이그레이션 (최초 1회)
+        self._migrate_eps_cache_json(conn)
+
+        # eps_chg_1m, foreign_net, inst_net 컬럼 추가 마이그레이션
+        for table in ("eps_cache", "stocks_daily"):
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+            if cols and "eps_chg_1m" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN eps_chg_1m REAL")
+                conn.commit()
+        for col in ("foreign_net", "inst_net"):
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(stocks_daily)").fetchall()]
+            if cols and col not in cols:
+                conn.execute(f"ALTER TABLE stocks_daily ADD COLUMN {col} REAL")
+                conn.commit()
+
         conn.close()
+
+    def _migrate_eps_cache_json(self, conn):
+        """db/eps_cache.json이 존재하면 DB로 이전 후 파일 삭제."""
+        import json
+        json_path = self.db_path.parent / "eps_cache.json"
+        if not json_path.exists():
+            return
+        try:
+            data = json.loads(json_path.read_text("utf-8"))
+            if data:
+                conn.executemany(
+                    """INSERT INTO eps_cache (ticker, eps_chg_1w, fetched_date)
+                       VALUES (:ticker, :eps_chg_1w, :fetched_date)
+                       ON CONFLICT(ticker) DO UPDATE SET
+                           eps_chg_1w   = excluded.eps_chg_1w,
+                           fetched_date = excluded.fetched_date""",
+                    [{"ticker": t, "eps_chg_1w": v["eps_chg_1w"], "fetched_date": v["fetched_date"]}
+                     for t, v in data.items()],
+                )
+                conn.commit()
+                print(f"[db_manager] eps_cache.json → DB 이전 완료: {len(data)}개 종목")
+            json_path.unlink()
+        except Exception as e:
+            print(f"[db_manager] eps_cache.json 마이그레이션 실패: {e}")
 
     # ------------------------------------------------------------------ #
     #  market_daily
@@ -92,6 +154,35 @@ class DBManager:
         conn.close()
         return df
 
+    def get_stocks_universe(self, session: str, start_date: str,
+                            end_date: str = None) -> pd.DataFrame:
+        """
+        특정 세션의 전 종목 주가 시계열 반환.
+
+        Parameters
+        ----------
+        session    : asia | europe | us
+        start_date : YYYY-MM-DD
+        end_date   : YYYY-MM-DD (기본: 오늘)
+
+        Returns
+        -------
+        DataFrame  [date, name, close, open, high, low, volume]
+        """
+        end = end_date or start_date
+        sql = """
+            SELECT date, name, close, open, high, low, volume
+            FROM market_daily
+            WHERE session = :session
+              AND category = 'stock'
+              AND date BETWEEN :start AND :end
+            ORDER BY date, name
+        """
+        conn = self._connect()
+        df = pd.read_sql_query(sql, conn, params={"session": session, "start": start_date, "end": end})
+        conn.close()
+        return df
+
     def get_latest_by_name(self) -> pd.DataFrame:
         """각 name의 가장 최근 레코드 1건씩 반환."""
         sql = """
@@ -115,11 +206,33 @@ class DBManager:
     def upsert_econ_event(self, records: list[dict]) -> int:
         if not records:
             return 0
+        # 필수 필드 기본값 보정
+        for r in records:
+            r.setdefault("event_time", None)
+            r.setdefault("period", None)
+            r.setdefault("actual", None)
+            r.setdefault("forecast", None)
+            r.setdefault("previous", None)
+            r.setdefault("surprise", None)
+            r.setdefault("importance", "medium")
+            r.setdefault("source_id", None)
+
         sql = """
             INSERT INTO econ_calendar
-                (event_date, event_time, country, indicator, period, actual, forecast, previous, surprise)
+                (event_date, event_time, country, indicator, period,
+                 actual, forecast, previous, surprise, importance, source_id)
             VALUES
-                (:event_date, :event_time, :country, :indicator, :period, :actual, :forecast, :previous, :surprise)
+                (:event_date, :event_time, :country, :indicator, :period,
+                 :actual, :forecast, :previous, :surprise, :importance, :source_id)
+            ON CONFLICT(event_date, country, indicator) DO UPDATE SET
+                event_time  = COALESCE(excluded.event_time,  event_time),
+                period      = COALESCE(excluded.period,      period),
+                actual      = COALESCE(excluded.actual,      actual),
+                forecast    = COALESCE(excluded.forecast,    forecast),
+                previous    = COALESCE(excluded.previous,    previous),
+                surprise    = COALESCE(excluded.surprise,    surprise),
+                importance  = excluded.importance,
+                source_id   = COALESCE(excluded.source_id,  source_id)
         """
         conn = self._connect()
         cursor = conn.executemany(sql, records)
@@ -131,11 +244,14 @@ class DBManager:
     def get_upcoming_events(self, from_date: str, days: int = 5) -> pd.DataFrame:
         """from_date 이후 days일 이내 경제 이벤트 반환."""
         sql = """
-            SELECT event_date, event_time, country, indicator, period, forecast, previous
+            SELECT event_date, event_time, country, indicator, period,
+                   forecast, previous, actual, importance
             FROM econ_calendar
             WHERE event_date >= :from_date
               AND event_date <= date(:from_date, '+' || :days || ' days')
-            ORDER BY event_date, event_time
+            ORDER BY
+                CASE importance WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+                event_date, event_time
         """
         conn = self._connect()
         df = pd.read_sql_query(sql, conn, params={"from_date": from_date, "days": days})
@@ -164,6 +280,310 @@ class DBManager:
         conn.execute("UPDATE briefings SET notified=1 WHERE id=?", (briefing_id,))
         conn.commit()
         conn.close()
+
+    # ------------------------------------------------------------------ #
+    #  stocks_daily
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _stocks_data_to_records(date: str, session: str, stocks_data: dict) -> list[dict]:
+        """stocks_data dict → stocks_daily 삽입용 레코드 리스트."""
+        records = []
+
+        # ── Asia ────────────────────────────────────────────────────────
+        for s in stocks_data.get("major", []):
+            records.append({
+                "date": date, "session": session, "category": "major",
+                "ticker": s.get("ticker", ""), "name": s.get("name"),
+                "market": s.get("market"), "close": s.get("close"),
+                "chg_pct": s.get("chg_pct"), "trade_val": s.get("trade_val"),
+                "mktcap": s.get("mktcap"),
+                "volume": None, "dollar_vol_b": None, "mktcap_b": None,
+                "turnover": None, "surge_ratio": None,
+                "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "foreign_net": None, "inst_net": None, "signal": None,
+            })
+        for s in stocks_data.get("featured", []):
+            records.append({
+                "date": date, "session": session, "category": "featured",
+                "ticker": s.get("ticker", ""), "name": s.get("name"),
+                "market": s.get("market"), "close": s.get("close"),
+                "chg_pct": s.get("chg_pct"), "trade_val": s.get("trade_val"),
+                "turnover": s.get("turnover"),
+                "foreign_net": s.get("foreign_net"), "inst_net": s.get("inst_net"),
+                "mktcap": None, "volume": None, "dollar_vol_b": None,
+                "mktcap_b": None, "surge_ratio": None,
+                "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "signal": s.get("signal"),
+            })
+
+        # ── Asia investor_flow (전 종목 외인/기관 순매수) ────────────────
+        for s in stocks_data.get("investor_flow", []):
+            records.append({
+                "date": date, "session": session, "category": "investor_flow",
+                "ticker": s.get("ticker", ""), "name": s.get("name"),
+                "foreign_net": s.get("foreign_net"), "inst_net": s.get("inst_net"),
+                "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                "market": s.get("market"),
+                "volume": None, "trade_val": None, "dollar_vol_b": None,
+                "mktcap": None, "mktcap_b": None, "turnover": None,
+                "surge_ratio": None, "eps_chg_1m": None, "eps_chg_1w": None,
+                "return_7d": None, "signal": None,
+            })
+
+        # ── Europe ──────────────────────────────────────────────────────
+        for s in stocks_data.get("sectors", []):
+            if session == "europe":
+                records.append({
+                    "date": date, "session": session, "category": "sectors",
+                    "ticker": s.get("ric", s.get("ticker", "")), "name": s.get("name"),
+                    "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "market": None, "volume": None, "trade_val": None,
+                    "dollar_vol_b": None, "mktcap": None, "mktcap_b": None,
+                    "turnover": None, "surge_ratio": None,
+                    "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "foreign_net": None, "inst_net": None, "signal": None,
+                })
+        for s in stocks_data.get("top_stocks", []):
+            records.append({
+                "date": date, "session": session, "category": "top_stocks",
+                "ticker": s.get("ric", s.get("ticker", "")), "name": s.get("name"),
+                "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                "volume": s.get("volume"),
+                "market": None, "trade_val": None, "dollar_vol_b": None,
+                "mktcap": None, "mktcap_b": None, "turnover": None,
+                "surge_ratio": None, "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "foreign_net": None, "inst_net": None, "signal": None,
+            })
+
+        # ── US ──────────────────────────────────────────────────────────
+        for s in stocks_data.get("sectors", []):
+            if session == "us":
+                records.append({
+                    "date": date, "session": session, "category": "sectors",
+                    "ticker": s.get("ticker", ""), "name": s.get("name"),
+                    "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "market": None, "volume": None, "trade_val": None,
+                    "dollar_vol_b": None, "mktcap": None, "mktcap_b": None,
+                    "turnover": None, "surge_ratio": None,
+                    "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "foreign_net": None, "inst_net": None, "signal": None,
+                })
+        for cat in ("mktcap_top", "tradeval_top", "turnover_surge", "eps_revision"):
+            for s in stocks_data.get(cat, []):
+                records.append({
+                    "date": date, "session": session, "category": cat,
+                    "ticker": s.get("ticker", ""), "name": s.get("name"),
+                    "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "dollar_vol_b": s.get("dollar_vol_b"), "mktcap_b": s.get("mktcap_b"),
+                    "surge_ratio": s.get("surge_ratio"),
+                    "eps_chg_1m": s.get("eps_chg_1m"), "eps_chg_1w": s.get("eps_chg_1w"),
+                    "return_7d": s.get("return_7d"), "signal": s.get("signal"),
+                    "market": None, "volume": None, "trade_val": None,
+                    "mktcap": None, "turnover": None,
+                })
+
+        return records
+
+    @staticmethod
+    def _records_to_stocks_data(rows: list) -> dict:
+        """DB rows → stocks_data dict (session-aware 재조립)."""
+        from collections import defaultdict
+        buckets = defaultdict(list)
+        for r in rows:
+            buckets[r["category"]].append(dict(r))
+
+        def _clean(rec: dict) -> dict:
+            """None 값만 있는 필드 제거."""
+            return {k: v for k, v in rec.items()
+                    if k not in ("id", "date", "session", "category", "created_at")
+                    and v is not None}
+
+        result = {}
+        for cat, items in buckets.items():
+            result[cat] = [_clean(r) for r in items]
+        return result
+
+    def upsert_stocks_daily(self, date: str, session: str, stocks_data: dict) -> int:
+        """stocks_data dict를 stocks_daily 테이블에 upsert."""
+        records = self._stocks_data_to_records(date, session, stocks_data)
+        if not records:
+            return 0
+        sql = """
+            INSERT INTO stocks_daily
+                (date, session, category, ticker, name, market,
+                 close, chg_pct, volume, trade_val, dollar_vol_b,
+                 mktcap, mktcap_b, turnover, surge_ratio,
+                 eps_chg_1m, eps_chg_1w, return_7d,
+                 foreign_net, inst_net, signal)
+            VALUES
+                (:date, :session, :category, :ticker, :name, :market,
+                 :close, :chg_pct, :volume, :trade_val, :dollar_vol_b,
+                 :mktcap, :mktcap_b, :turnover, :surge_ratio,
+                 :eps_chg_1m, :eps_chg_1w, :return_7d,
+                 :foreign_net, :inst_net, :signal)
+            ON CONFLICT(date, session, category, ticker) DO UPDATE SET
+                name         = excluded.name,
+                close        = excluded.close,
+                chg_pct      = excluded.chg_pct,
+                volume       = COALESCE(excluded.volume,       volume),
+                trade_val    = COALESCE(excluded.trade_val,    trade_val),
+                dollar_vol_b = COALESCE(excluded.dollar_vol_b, dollar_vol_b),
+                mktcap       = COALESCE(excluded.mktcap,       mktcap),
+                mktcap_b     = COALESCE(excluded.mktcap_b,     mktcap_b),
+                turnover     = COALESCE(excluded.turnover,     turnover),
+                surge_ratio  = COALESCE(excluded.surge_ratio,  surge_ratio),
+                eps_chg_1m   = COALESCE(excluded.eps_chg_1m,   eps_chg_1m),
+                eps_chg_1w   = COALESCE(excluded.eps_chg_1w,   eps_chg_1w),
+                return_7d    = COALESCE(excluded.return_7d,    return_7d),
+                foreign_net  = COALESCE(excluded.foreign_net,  foreign_net),
+                inst_net     = COALESCE(excluded.inst_net,     inst_net),
+                signal       = COALESCE(excluded.signal,       signal),
+                created_at   = datetime('now','localtime')
+        """
+        conn = self._connect()
+        cursor = conn.executemany(sql, records)
+        conn.commit()
+        count = cursor.rowcount
+        conn.close()
+        return count
+
+    def get_stocks_daily(self, date: str, session: str) -> dict:
+        """
+        stocks_daily에서 date+session 데이터를 stocks_data 형식으로 반환.
+
+        Returns
+        -------
+        dict  {"major": [...], "featured": [...]} or {"sectors": [...], ...}
+        """
+        sql = """
+            SELECT * FROM stocks_daily
+            WHERE date = ? AND session = ?
+            ORDER BY category, id
+        """
+        conn = self._connect()
+        rows = conn.execute(sql, (date, session)).fetchall()
+        conn.close()
+        if not rows:
+            return {}
+        return self._records_to_stocks_data(rows)
+
+    # ------------------------------------------------------------------ #
+    #  eps_cache
+    # ------------------------------------------------------------------ #
+    def upsert_eps_cache(self, records: list[dict]) -> int:
+        """
+        EPS 캐시 upsert.
+
+        Parameters
+        ----------
+        records : list of dict  {ticker, eps_chg_1m, eps_chg_1w, fetched_date}
+        """
+        if not records:
+            return 0
+        for r in records:
+            r.setdefault("eps_chg_1m", None)
+            r.setdefault("eps_chg_1w", None)
+        sql = """
+            INSERT INTO eps_cache (ticker, eps_chg_1m, eps_chg_1w, fetched_date)
+            VALUES (:ticker, :eps_chg_1m, :eps_chg_1w, :fetched_date)
+            ON CONFLICT(ticker) DO UPDATE SET
+                eps_chg_1m   = excluded.eps_chg_1m,
+                eps_chg_1w   = excluded.eps_chg_1w,
+                fetched_date = excluded.fetched_date,
+                created_at   = datetime('now','localtime')
+        """
+        conn = self._connect()
+        cursor = conn.executemany(sql, records)
+        conn.commit()
+        count = cursor.rowcount
+        conn.close()
+        return count
+
+    def get_eps_cache(self) -> dict:
+        """
+        전체 EPS 캐시 반환.
+
+        Returns
+        -------
+        dict  {ticker: {eps_chg_1m, eps_chg_1w, fetched_date}}
+        """
+        sql = "SELECT ticker, eps_chg_1m, eps_chg_1w, fetched_date FROM eps_cache"
+        conn = self._connect()
+        rows = conn.execute(sql).fetchall()
+        conn.close()
+        return {r["ticker"]: {
+                    "eps_chg_1m":  r["eps_chg_1m"],
+                    "eps_chg_1w":  r["eps_chg_1w"],
+                    "fetched_date": r["fetched_date"],
+                } for r in rows}
+
+    def get_market_breadth(self, date: str, session: str) -> dict:
+        """
+        market_daily에서 시장 폭 지표 재계산 (브리핑 재생성 시 사용).
+        당일 + 직전 거래일 종가 비교로 등락률 산출.
+        """
+        sql = """
+            SELECT t.name,
+                   t.close  AS close_today,
+                   p.close  AS close_prev,
+                   (t.close * COALESCE(t.volume, 0)) AS trade_val
+            FROM market_daily t
+            JOIN market_daily p
+              ON p.name = t.name
+             AND p.session  = :session
+             AND p.category = 'stock'
+             AND p.date = (
+                 SELECT MAX(m2.date) FROM market_daily m2
+                  WHERE m2.name = t.name
+                    AND m2.session  = :session
+                    AND m2.category = 'stock'
+                    AND m2.date < :date
+             )
+            WHERE t.date     = :date
+              AND t.session  = :session
+              AND t.category = 'stock'
+              AND t.close > 0
+              AND p.close > 0
+        """
+        conn = self._connect()
+        rows = conn.execute(sql, {"date": date, "session": session}).fetchall()
+        conn.close()
+        if not rows:
+            return {}
+
+        chg_list = [(r["close_today"] - r["close_prev"]) / abs(r["close_prev"]) * 100
+                    for r in rows]
+        tv_list  = [r["trade_val"] or 0 for r in rows]
+        up    = sum(1 for c in chg_list if c > 0)
+        down  = sum(1 for c in chg_list if c < 0)
+        flat  = sum(1 for c in chg_list if c == 0)
+        total = up + down + flat
+        tv_sum = sum(tv_list)
+        return {
+            "up": up, "down": down, "flat": flat, "total": total,
+            "up_pct":       round(up / total * 100, 1) if total > 0 else None,
+            "adr":          round(up / down, 2)         if down > 0 else None,
+            "weighted_chg": round(
+                sum(c * tv for c, tv in zip(chg_list, tv_list)) / tv_sum, 2
+            ) if tv_sum > 0 else None,
+        }
+
+    def get_market_flow(self, date: str) -> dict:
+        """
+        stocks_daily의 investor_flow 레코드에서 시장 전체 외인/기관 합계 반환.
+        """
+        sql = """
+            SELECT SUM(foreign_net) AS foreign_net,
+                   SUM(inst_net)    AS inst_net,
+                   COUNT(*)         AS n_stocks
+            FROM stocks_daily
+            WHERE date = ? AND session = 'asia' AND category = 'investor_flow'
+        """
+        conn = self._connect()
+        row = conn.execute(sql, (date,)).fetchone()
+        conn.close()
+        if not row or not row["n_stocks"]:
+            return {}
+        return {
+            "foreign_net": int(row["foreign_net"]) if row["foreign_net"] is not None else None,
+            "inst_net":    int(row["inst_net"])    if row["inst_net"]    is not None else None,
+            "n_stocks":    row["n_stocks"],
+        }
 
     def get_latest_briefing(self, session: str = None) -> dict | None:
         cond = "WHERE session=?" if session else ""

@@ -79,10 +79,13 @@ def run_session(session: str, target_date: str,
     # Step 2: 경제지표 캘린더 (US 세션에서만 or 아시아에서 한 번)
     if session in ("us", "asia"):
         print(f"\n[2/4] 경제지표 캘린더 수집")
-        from exe.collect_econ_cal import collect_econ_calendar
-        records = collect_econ_calendar(days_ahead=5)
-        n = db.upsert_econ_event(records)
-        print(f"  경제지표 upserted: {n}건")
+        try:
+            from exe.collect_econ_cal import collect_econ_calendar
+            records = collect_econ_calendar(days_ahead=5)
+            n = db.upsert_econ_event(records)
+            print(f"  경제지표 upserted: {n}건")
+        except Exception as _e:
+            print(f"  [경제지표 수집 ERROR] {_e}")
     else:
         print(f"\n[2/4] 경제지표 캘린더 수집 (skip: {session})")
 
@@ -97,7 +100,9 @@ def run_session(session: str, target_date: str,
         print(f"\n[3/4-pre] KOSPI/KOSDAQ 종목 수집")
         from exe.collect_stocks import fetch_top_stocks
         stocks_data = fetch_top_stocks(target_date)
-        print(f"  주요종목 {len(stocks_data.get('major', []))}개  특징주 {len(stocks_data.get('featured', []))}개")
+        print(f"  주요종목 {len(stocks_data.get('major', []))}개  "
+              f"특징주 {len(stocks_data.get('featured', []))}개  "
+              f"수급데이터 {len(stocks_data.get('investor_flow', []))}개")
 
     elif session == "europe":
         print(f"\n[3/4-pre] 유럽 섹터 + 종목 수집")
@@ -119,11 +124,16 @@ def run_session(session: str, target_date: str,
         for prior_session in ("asia", "europe"):
             row = db.get_latest_briefing(prior_session)
             if row and row.get("date") == target_date:
-                # 브리핑 첫 300자 (핵심 요약 부분)
                 prior_briefings[prior_session] = row["content"][:400]
         if prior_briefings:
             stocks_data["prior_briefings"] = prior_briefings
             print(f"  이전 브리핑 컨텍스트: {list(prior_briefings.keys())}")
+
+    # 종목 데이터 DB 저장 (prior_briefings 제외)
+    if stocks_data:
+        save_stocks = {k: v for k, v in stocks_data.items() if k != "prior_briefings"}
+        n_saved = db.upsert_stocks_daily(target_date, session, save_stocks)
+        print(f"  [stocks_daily] DB 저장: {n_saved}건")
 
     print(f"\n[3/4] LLM 브리핑 생성")
     from summarize.llm_briefing import generate_briefing

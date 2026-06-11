@@ -63,38 +63,121 @@ europe:
       name: EU_FoodBev
     - ric: ".SX6P"
       name: EU_Telecom
-  # DAX 주요 구성종목 (LSEG RIC)
-  top_stocks:
-    - ric: "SAP.DE"
-      name: SAP
-    - ric: "SIE.DE"
-      name: Siemens
-    - ric: "ALV.DE"
-      name: Allianz
-    - ric: "DTE.DE"
-      name: DeutscheTelekom
-    - ric: "MRK.DE"
-      name: Merck_DE
-    - ric: "BMW.DE"
-      name: BMW
-    - ric: "VOW3.DE"
-      name: Volkswagen
-    - ric: "BAS.DE"
-      name: BASF
-    - ric: "BAYN.DE"
-      name: Bayer
-    - ric: "DBK.DE"
-      name: DeutscheBank
-    - ric: "AZN.L"
-      name: AstraZeneca
-    - ric: "HSBA.L"
-      name: HSBC
-    - ric: "SHEL.L"
-      name: Shell
-    - ric: "BP.L"
-      name: BP
-    - ric: "LVMH.PA"
-      name: LVMH
+  # DAX40 + FTSE100주요30 + CAC40 구성종목 (yfinance)
+  stock_universe:
+    # DAX40
+    - {ticker: "ADS.DE",  name: "Adidas",          index: "DAX"}
+    - {ticker: "AIR.DE",  name: "Airbus",           index: "DAX"}
+    - {ticker: "ALV.DE",  name: "Allianz",          index: "DAX"}
+    - {ticker: "BAS.DE",  name: "BASF",             index: "DAX"}
+    - {ticker: "BAYN.DE", name: "Bayer",            index: "DAX"}
+    - {ticker: "BEI.DE",  name: "Beiersdorf",       index: "DAX"}
+    - {ticker: "BMW.DE",  name: "BMW",              index: "DAX"}
+    - {ticker: "BNR.DE",  name: "Brenntag",         index: "DAX"}
+    - {ticker: "CON.DE",  name: "Continental",      index: "DAX"}
+    - {ticker: "1COV.DE", name: "Covestro",         index: "DAX"}
+    - {ticker: "DHER.DE", name: "Delivery Hero",    index: "DAX"}
+    - {ticker: "DHL.DE",  name: "DHL Group",        index: "DAX"}
+    - {ticker: "DB1.DE",  name: "Deutsche Boerse",  index: "DAX"}
+    - {ticker: "DBK.DE",  name: "Deutsche Bank",    index: "DAX"}
+    - {ticker: "DTE.DE",  name: "Deutsche Telekom", index: "DAX"}
+    - {ticker: "DTG.DE",  name: "Daimler Truck",    index: "DAX"}
+    - {ticker: "ENR.DE",  name: "Siemens Energy",   index: "DAX"}
+    - {ticker: "EOAN.DE", name: "E.ON",             index: "DAX"}
+    - {ticker: "FRE.DE",  name: "Fresenius",        index: "DAX"}
+    - {ticker: "FME.DE",  name: "Fresenius Medical",index: "DAX"}
+    - {ticker: "HNR1.DE", name: "Hannover Re",      index: "DAX"}
+    - {ticker: "HEN3.DE", name: "Henkel",           index: "DAX"}
+    - {ticker: "HFG.DE",  name: "HelloFresh",       index: "DAX"}
+    - {ticker: "IFX.DE",  name: "Infineon",         index: "DAX"}
+    - {ticker: "MTX.DE",  name: "MTU Aero",         index: "DAX"}
+    - {ticker: "MBG.DE",  name: "Mercedes-Benz",    index: "DAX"}
+    - {ticker: "MRK.DE",  name: "Merck KGaA",       index: "DAX"}
+    - {ticker: "MUV2.DE", name: "Munich Re",        index: "DAX"}
+    - {ticker: "NFZ.DE",  name: "Nucera",           index: "DAX"}
+    - {ticker: "P911.DE", name: "Porsche AG",       index: "DAX"}
+    - {ticker: "PAH3.DE", name: "Porsche SE",       index: "DAX"}
+    - {ticker: "PUM.DE",  name: "Puma",             index: "DAX"}
+    - {ticker: "QIA.DE",  name: "Qiagen",           index: "DAX"}
+    - {ticker: "RHM.DE",  name: "Rheinmetall",      index: "DAX"}
+    - {ticker: "RWE.DE",  name: "RWE",              index: "DAX"}
+    - {ticker: "SAP.DE",  name: "SAP",              index: "DAX"}
+    - {ticker: "SIE.DE",  name: "Siemens",          index: "DAX"}
+    - {ticker: "SRT3.DE", name: "Sartorius",        index: "DAX"}
+    - {ticker: "SY1.DE",  name: "Symrise",          index: "DAX"}
+    - {ticker: "VOW3.DE", name: "Volkswagen",       index: "DAX"}
+    # FTSE100 주요 30
+    - {ticker: "SHEL.L",  name: "Shell",            index: "FTSE"}
+    - {ticker: "AZN.L",   name: "AstraZeneca",      index: "FTSE"}
+    - {ticker: "HSBA.L",  name: "HSBC",             index: "FTSE"}
+    - {ticker: "ULVR.L",  name: "Unilever",         index: "FTSE"}
+    - {ticker: "BP.L",    name: "BP",               index: "FTSE"}
+    - {ticker: "RIO.L",   name: "Rio Tinto",        index: "FTSE"}
+    - {ticker: "GSK.L",   name: "GSK",              index: "FTSE"}
+    - {ticker: "DGE.L",   name: "Diageo",           index: "FTSE"}
+    - {ticker: "LSEG.L",  name: "LSEG",             index: "FTSE"}
+    - {ticker: "NG.L",    name: "Natl Grid",        index: "FTSE"}
+    - {ticker: "BT-A.L",  name: "BT Group",         index: "FTSE"}
+    - {ticker: "LLOY.L",  name: "Lloyds",           index: "FTSE"}
+    - {ticker: "BARC.L",  name: "Barclays",         index: "FTSE"}
+    - {ticker: "STAN.L",  name: "Std Chartered",    index: "FTSE"}
+    - {ticker: "PRU.L",   name: "Prudential",       index: "FTSE"}
+    - {ticker: "BATS.L",  name: "BAT",              index: "FTSE"}
+    - {ticker: "IMB.L",   name: "Imperial Brands",  index: "FTSE"}
+    - {ticker: "RKT.L",   name: "Reckitt",          index: "FTSE"}
+    - {ticker: "WPP.L",   name: "WPP",              index: "FTSE"}
+    - {ticker: "EXPN.L",  name: "Experian",         index: "FTSE"}
+    - {ticker: "ANTO.L",  name: "Antofagasta",      index: "FTSE"}
+    - {ticker: "AAL.L",   name: "Anglo American",   index: "FTSE"}
+    - {ticker: "CPG.L",   name: "Compass",          index: "FTSE"}
+    - {ticker: "HLMA.L",  name: "Halma",            index: "FTSE"}
+    - {ticker: "SSE.L",   name: "SSE",              index: "FTSE"}
+    - {ticker: "SGE.L",   name: "Sage",             index: "FTSE"}
+    - {ticker: "AHT.L",   name: "Ashtead",          index: "FTSE"}
+    - {ticker: "BKG.L",   name: "Berkeley",         index: "FTSE"}
+    - {ticker: "INF.L",   name: "Informa",          index: "FTSE"}
+    - {ticker: "IHG.L",   name: "IHG",              index: "FTSE"}
+    # CAC40
+    - {ticker: "MC.PA",    name: "LVMH",            index: "CAC"}
+    - {ticker: "TTE.PA",   name: "TotalEnergies",   index: "CAC"}
+    - {ticker: "SAN.PA",   name: "Sanofi",          index: "CAC"}
+    - {ticker: "BNP.PA",   name: "BNP Paribas",     index: "CAC"}
+    - {ticker: "OR.PA",    name: "L'Oreal",         index: "CAC"}
+    - {ticker: "AI.PA",    name: "Air Liquide",     index: "CAC"}
+    - {ticker: "RMS.PA",   name: "Hermes",          index: "CAC"}
+    - {ticker: "SU.PA",    name: "Schneider",       index: "CAC"}
+    - {ticker: "ORA.PA",   name: "Orange",          index: "CAC"}
+    - {ticker: "AIR.PA",   name: "Airbus (FR)",     index: "CAC"}
+    - {ticker: "CS.PA",    name: "AXA",             index: "CAC"}
+    - {ticker: "BN.PA",    name: "Danone",          index: "CAC"}
+    - {ticker: "DG.PA",    name: "Vinci",           index: "CAC"}
+    - {ticker: "VIE.PA",   name: "Veolia",          index: "CAC"}
+    - {ticker: "EL.PA",    name: "EssilorLuxottica",index: "CAC"}
+    - {ticker: "CA.PA",    name: "Carrefour",       index: "CAC"}
+    - {ticker: "ATO.PA",   name: "Atos",            index: "CAC"}
+    - {ticker: "SGO.PA",   name: "Saint-Gobain",    index: "CAC"}
+    - {ticker: "ML.PA",    name: "Michelin",        index: "CAC"}
+    - {ticker: "KER.PA",   name: "Kering",          index: "CAC"}
+    - {ticker: "LR.PA",    name: "Legrand",         index: "CAC"}
+    - {ticker: "STM.PA",   name: "STMicro",         index: "CAC"}
+    - {ticker: "ENGI.PA",  name: "Engie",           index: "CAC"}
+    - {ticker: "CAP.PA",   name: "Capgemini",       index: "CAC"}
+    - {ticker: "VIV.PA",   name: "Vivendi",         index: "CAC"}
+    - {ticker: "RI.PA",    name: "Pernod Ricard",   index: "CAC"}
+    - {ticker: "DSY.PA",   name: "Dassault Sys",    index: "CAC"}
+    - {ticker: "WLN.PA",   name: "Worldline",       index: "CAC"}
+    - {ticker: "EDEN.PA",  name: "Edenred",         index: "CAC"}
+    - {ticker: "ACA.PA",   name: "Credit Agricole", index: "CAC"}
+    - {ticker: "SG.PA",    name: "Soc Generale",    index: "CAC"}
+    - {ticker: "SW.PA",    name: "Sodexo",          index: "CAC"}
+    - {ticker: "URW.PA",   name: "Unibail",         index: "CAC"}
+    - {ticker: "PUB.PA",   name: "Publicis",        index: "CAC"}
+    - {ticker: "STLAP.PA", name: "Stellantis",      index: "CAC"}
+    - {ticker: "GLE.PA",   name: "SocGen",          index: "CAC"}
+    - {ticker: "HO.PA",    name: "Thales",          index: "CAC"}
+    - {ticker: "TEP.PA",   name: "Teleperformance", index: "CAC"}
+    - {ticker: "ERF.PA",   name: "Eurofins",        index: "CAC"}
+    - {ticker: "SOLB.PA",  name: "Solvay",          index: "CAC"}
 
 us:
   indices:

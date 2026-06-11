@@ -167,18 +167,28 @@ def format_snapshot_text(snapshot: dict) -> str:
             lines.append(f"  {s['name']:12s}  {s['market']:6s}  {s['close']:>8,}  {chg:>7s}  거래대금 {val}  시총 {cap}")
 
     if stocks.get("featured"):
-        lines.append("\n[KOSPI/KOSDAQ 특징주 (등락률+거래량급증)]")
+        lines.append("\n[KOSPI/KOSDAQ 특징주 (등락률+거래량급증+수급)]")
         for s in stocks["featured"]:
             chg = f"{s['chg_pct']:+.2f}%"
-            val = f"{s['trade_val']/1e8:.0f}억"
-            lines.append(f"  {s['name']:12s}  {s['market']:6s}  {s['close']:>8,}  {chg:>7s}  거래대금 {val}  [{s['signal']}]")
+            fn  = f"외인 {s['foreign_net']//100_000_000:+,}억" if s.get("foreign_net") is not None else "외인 -"
+            it  = f"기관 {s['inst_net']//100_000_000:+,}억"    if s.get("inst_net")    is not None else "기관 -"
+            lines.append(f"  {s['name']:12s}  {chg:>7s}  {fn}  {it}  [{s['signal']}]")
 
     # 경제지표
     if snapshot["econ_upcoming"]:
-        lines.append("\n[향후 3일 경제지표 발표]")
+        lines.append("\n[향후 경제지표 발표]")
+        imp_icon = {"high": "★★★", "medium": "★★☆", "low": "★☆☆"}
         for ev in snapshot["econ_upcoming"]:
-            fc = f"예상 {ev['forecast']}" if ev.get("forecast") else ""
-            lines.append(f"  {ev['event_date']}  {ev['country']:3s}  {ev['indicator']:25s}  {fc}")
+            imp  = imp_icon.get(ev.get("importance", "medium"), "★★☆")
+            time_str = f" {ev['event_time']}ET" if ev.get("event_time") else ""
+            period_str = f" [{ev['period']}]" if ev.get("period") else ""
+            fc   = f"  예상 {ev['forecast']}" if ev.get("forecast") is not None else ""
+            prev = f"  이전 {ev['previous']}" if ev.get("previous") is not None else ""
+            act  = f"  실제 {ev['actual']}" if ev.get("actual") is not None else ""
+            lines.append(
+                f"  {ev['event_date']}{time_str}  {ev['country']:3s}  {imp}  "
+                f"{ev['indicator']:20s}{period_str}{fc}{prev}{act}"
+            )
 
     return "\n".join(lines)
 
