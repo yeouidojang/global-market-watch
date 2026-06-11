@@ -1,18 +1,19 @@
 """
-경제지표 캘린더 수집 v2 (Finnhub primary + FRED secondary)
+경제지표 캘린더 수집 v3 (FRED 단독)
 
-Finnhub /api/v1/economic-calendar:
-  - 미국(US), 유럽(EU), 일본(JP), 한국(KR), 중국(CN)
-  - estimate(예상치) + actual(실제치) + prev(이전치) 모두 지원
-  - 향후 14일 기본 수집 (이번주·다음주)
+Finnhub /api/v1/economic-calendar 는 무료 플랜에서 403 Forbidden 반환 —
+economic-calendar 엔드포인트가 유료 플랜 전용으로 제한됨.
+매 실행마다 403 후 fallback하는 패턴은 로그 오염 + 레이턴시 낭비이므로
+Finnhub 경제지표 호출을 완전 제거하고 FRED를 단독 소스로 사용한다.
 
-FRED (선택, 기본 활성화): US 지표 actual/period 보완
-  - --no-fred 플래그로 비활성화
+FRED: US 지표 12개 (CPI·PCE·NFP·GDP·JOLTS 등)
+  - actual(실제치) + previous(이전치) 지원
+  - forecast(예상치)는 FRED 미지원 → None
+  - period 정보(기준기간) 포함
 
 사용법:
-    python collect_econ_cal.py              # 향후 14일 (Finnhub + FRED)
+    python collect_econ_cal.py              # 향후 14일
     python collect_econ_cal.py --days 7
-    python collect_econ_cal.py --no-fred    # Finnhub만 사용
 """
 
 import os
@@ -31,78 +32,8 @@ import pandas as pd
 
 from db.db_manager import DBManager
 
-FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
-FRED_API_KEY    = os.getenv("FRED_API_KEY", "")
-FINNHUB_BASE    = "https://finnhub.io/api/v1"
-FRED_BASE       = "https://api.stlouisfed.org/fred"
-
-TARGET_COUNTRIES  = {"US", "EU", "JP", "KR", "CN"}
-IMPORTANCE_FILTER = {"high", "medium"}   # low 제외
-
-
-# ── Finnhub ─────────────────────────────────────────────────────────
-
-def _fetch_finnhub_econ(from_date: str, to_date: str) -> list:
-    if not FINNHUB_API_KEY:
-        raise RuntimeError("FINNHUB_API_KEY가 .env에 없습니다.")
-    resp = requests.get(
-        f"{FINNHUB_BASE}/economic-calendar",
-        params={"from": from_date, "to": to_date, "token": FINNHUB_API_KEY},
-        timeout=20, verify=False,
-    )
-    resp.raise_for_status()
-    return resp.json().get("economicCalendar", [])
-
-
-def collect_finnhub_econ(from_date: str, to_date: str) -> list[dict]:
-    """Finnhub 경제지표 → econ_calendar 레코드 리스트."""
-    raw = _fetch_finnhub_econ(from_date, to_date)
-    records = []
-    for ev in raw:
-        country = (ev.get("country") or "").upper()
-        impact  = (ev.get("impact")  or "").lower()
-        if country not in TARGET_COUNTRIES or impact not in IMPORTANCE_FILTER:
-            continue
-
-        time_str = ev.get("time", "")
-        if len(time_str) > 10 and " " in time_str:
-            event_date = time_str[:10]
-            event_time = time_str[11:16]   # "HH:MM"
-        else:
-            event_date = time_str[:10]
-            event_time = None
-
-        if not event_date:
-            continue
-
-        actual   = ev.get("actual")
-        forecast = ev.get("estimate")
-        previous = ev.get("prev")
-
-        surprise = None
-        if actual is not None and forecast is not None:
-            try:
-                surprise = round(float(actual) - float(forecast), 4)
-            except (TypeError, ValueError):
-                pass
-
-        records.append({
-            "event_date":  event_date,
-            "event_time":  event_time,
-            "country":     country,
-            "indicator":   ev.get("event", ""),
-            "period":      None,
-            "actual":      actual,
-            "forecast":    forecast,
-            "previous":    previous,
-            "surprise":    surprise,
-            "importance":  impact,
-            "source_id":   "finnhub",
-        })
-    return records
-
-
-# ── FRED (US actuals 보완) ────────────────────────────────────────────
+FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+FRED_BASE    = "https://api.stlouisfed.org/fred"
 
 FRED_SERIES = {
     "CPIAUCSL":    {"name": "CPI YoY",         "freq": "M", "importance": "high",   "release_time_et": "08:30"},
@@ -197,10 +128,10 @@ def _collect_fred_series(series_id: str, meta: dict, today_str: str, to_date: st
         release_date = past_rds[0] if past_rds else today_str
         records.append({
             "event_date": release_date, "event_time": rel_time,
-            "country": "US",           "indicator": meta["name"],
-            "period": period,          "actual": actual,
-            "forecast": None,          "previous": previous,
-            "surprise": None,          "importance": importance,
+            "country": "US",            "indicator": meta["name"],
+            "period": period,           "actual": actual,
+            "forecast": None,           "previous": previous,
+            "surprise": None,           "importance": importance,
             "source_id": series_id,
         })
 
@@ -225,83 +156,37 @@ def _collect_fred_series(series_id: str, meta: dict, today_str: str, to_date: st
     return records
 
 
-def collect_fred_supplement(today_str: str, to_date: str) -> list[dict]:
-    """FRED: US 지표 actual + period 정보 보완."""
+def collect_econ_calendar(days_ahead: int = 14, **_kwargs) -> list[dict]:
+    """경제지표 캘린더 수집 (FRED 단독).
+
+    Finnhub economic-calendar는 무료 플랜 미지원(403)으로 제거됨.
+    **_kwargs: 이전 버전의 use_fred 등 파라미터 호환성 유지용.
+    """
+    today_str = date.today().strftime("%Y-%m-%d")
+    to_date   = (date.today() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
     if not FRED_API_KEY:
-        print("  [FRED] FRED_API_KEY 없음 — 건너뜀")
+        print("  [collect_econ_cal] FRED_API_KEY 없음 — 건너뜀")
         return []
+
+    print(f"  [FRED] {today_str} ~ {to_date} 경제지표 수집 중...")
     all_records = []
     for series_id, meta in FRED_SERIES.items():
         print(f"  [FRED] {series_id:15s} {meta['name']}")
         recs = _collect_fred_series(series_id, meta, today_str, to_date)
         all_records.extend(recs)
+    print(f"  [FRED] 수집 완료: {len(all_records)}건")
     return all_records
-
-
-# ── 통합 수집 ─────────────────────────────────────────────────────────
-
-def _merge_records(finnhub_recs: list[dict], fred_recs: list[dict]) -> list[dict]:
-    """Finnhub + FRED 병합.
-
-    동일 (event_date, indicator 대소문자 무시) 조합은 Finnhub 우선.
-    FRED는 Finnhub에 없는 항목 또는 period 정보 보완용으로만 추가.
-    """
-    finnhub_keys = {
-        (r["event_date"], r["indicator"].upper())
-        for r in finnhub_recs
-    }
-    merged = list(finnhub_recs)
-    for r in fred_recs:
-        key = (r["event_date"], r["indicator"].upper())
-        if key not in finnhub_keys:
-            merged.append(r)
-    return merged
-
-
-def collect_econ_calendar(days_ahead: int = 14, use_fred: bool = True) -> list[dict]:
-    """경제지표 캘린더 수집 (Finnhub primary + FRED secondary).
-
-    from_date: 과거 3일 포함 (발표 직후 actual 수집 목적)
-    to_date:   오늘 + days_ahead
-    """
-    today_str = date.today().strftime("%Y-%m-%d")
-    from_date = (date.today() - timedelta(days=3)).strftime("%Y-%m-%d")
-    to_date   = (date.today() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
-
-    print(f"  [Finnhub] {from_date} ~ {to_date} 경제지표 수집 중...")
-    finnhub_recs = []
-    try:
-        finnhub_recs = collect_finnhub_econ(from_date, to_date)
-        by_country = {}
-        for r in finnhub_recs:
-            by_country[r["country"]] = by_country.get(r["country"], 0) + 1
-        print(f"  [Finnhub] 수집: {len(finnhub_recs)}건  "
-              + "  ".join(f"{c}:{n}" for c, n in sorted(by_country.items())))
-    except Exception as e:
-        print(f"  [Finnhub ERROR] {e}")
-
-    fred_recs = []
-    if use_fred and FRED_API_KEY:
-        print(f"  [FRED] US 지표 actual/period 보완 중...")
-        try:
-            fred_recs = collect_fred_supplement(today_str, to_date)
-            print(f"  [FRED] 수집: {len(fred_recs)}건")
-        except Exception as e:
-            print(f"  [FRED ERROR] {e}")
-
-    return _merge_records(finnhub_recs, fred_recs)
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--days",    type=int,  default=14,
+    parser.add_argument("--days", type=int, default=14,
                         help="오늘부터 수집할 향후 일수 (기본 14)")
-    parser.add_argument("--no-fred", action="store_true",
-                        help="FRED 보완 건너뜀 (Finnhub만 사용)")
     args = parser.parse_args()
 
     print(f"[collect_econ_cal] 향후 {args.days}일 경제지표 수집 중...")
-    records = collect_econ_calendar(days_ahead=args.days, use_fred=not args.no_fred)
+    records = collect_econ_calendar(days_ahead=args.days)
     if not records:
         print("  수집된 데이터 없음")
         return
@@ -311,8 +196,7 @@ def main():
     print(f"[collect_econ_cal] 저장 완료: {n}건")
 
     df = pd.DataFrame(records).sort_values(
-        ["event_date", "country", "importance"],
-        ascending=[True, True, True],
+        ["event_date", "importance"], ascending=[True, True]
     )
     cols = ["event_date", "event_time", "country", "indicator",
             "actual", "forecast", "previous", "importance"]

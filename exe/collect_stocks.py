@@ -663,18 +663,28 @@ def fetch_europe_stocks(target_date: str) -> dict:
     hist_start = (pd.Timestamp(target_date) - pd.Timedelta(days=9)).strftime("%Y-%m-%d")
 
     def _lseg_batch(rics: list[str]) -> dict[str, dict]:
-        """LSEG RIC 리스트 → {ric: {close, chg_pct, volume}}."""
+        """LSEG RIC 리스트 → {ric: {close, chg_pct, volume}}.
+
+        단일 날짜 쿼리는 휴장일·지연 데이터 시 0건 반환 위험이 있으므로
+        hist_start ~ today_end 범위로 조회 후 최신 행을 취한다.
+        """
         if not rics:
             return {}
-        try:
-            df = ld.get_history(
-                universe=rics,
-                fields=["TRDPRC_1", "PCTCHNG", "ACVOL_UNS"],
-                start=target_date,
-                end=target_date,
-            )
-        except Exception as e:
-            print(f"    [LSEG batch ERROR] {e}")
+        for attempt in range(3):
+            try:
+                df = ld.get_history(
+                    universe=rics,
+                    fields=["TRDPRC_1", "PCTCHNG", "ACVOL_UNS"],
+                    start=hist_start,
+                    end=today_end,
+                )
+                break
+            except Exception as e:
+                wait = 2 ** attempt
+                print(f"    [LSEG batch attempt={attempt+1}] {e} → retry in {wait}s")
+                import time as _time; _time.sleep(wait)
+        else:
+            print(f"    [LSEG batch ERROR] 3회 재시도 실패")
             return {}
         if df is None or df.empty:
             return {}
@@ -777,23 +787,49 @@ def fetch_europe_stocks(target_date: str) -> dict:
             "surge_ratio":  surge_ratio,
         }
 
-    # ── 시총 조회 (LSEG TR.CompanyMarketCap, USD billion) ───────────
+    # ── 시총 조회 (LSEG TR.CompanyMarketCap, batch=25 + retry×3 + yfinance fallback) ──
+    import time as _time
+    import yfinance as _yf
+
     mktcap_b_map: dict[str, float] = {}
+    mktcap_failed: list[str] = []
+
     if stats:
-        try:
-            mc_part = ld.get_data(
-                universe=list(stats.keys()),
-                fields=["TR.CompanyMarketCap"],
-            )
-            if mc_part is not None and not mc_part.empty:
-                for _, row in mc_part.iterrows():
-                    tk = str(row.get("Instrument", "")).strip()
-                    cap = row.get("Company Market Cap")
-                    if tk and pd.notna(cap) and cap:
-                        # LSEG는 현지통화 단위 — USD 환산은 생략하고 십억 단위로
-                        mktcap_b_map[tk] = round(float(cap) / 1e9, 2)
-        except Exception as _e:
-            print(f"    [europe mktcap LSEG ERROR] {_e}")
+        all_tks = list(stats.keys())
+        _eu_mktcap_batch = 25
+        for _bi in range(0, len(all_tks), _eu_mktcap_batch):
+            _batch = all_tks[_bi:_bi + _eu_mktcap_batch]
+            _success = False
+            for _attempt in range(3):
+                try:
+                    mc_part = ld.get_data(universe=_batch, fields=["TR.CompanyMarketCap"])
+                    if mc_part is not None and not mc_part.empty:
+                        for _, row in mc_part.iterrows():
+                            tk = str(row.get("Instrument", "")).strip()
+                            cap = row.get("Company Market Cap")
+                            if tk and pd.notna(cap) and cap:
+                                mktcap_b_map[tk] = round(float(cap) / 1e9, 2)
+                    _success = True
+                    break
+                except Exception as _be:
+                    _wait = 2 ** _attempt
+                    print(f"    [europe mktcap LSEG i={_bi} attempt={_attempt+1}] {_be} → retry in {_wait}s")
+                    _time.sleep(_wait)
+            if not _success:
+                mktcap_failed.extend(_batch)
+            _time.sleep(0.3)
+
+        if mktcap_failed:
+            print(f"    [europe mktcap yf fallback] {len(mktcap_failed)}개 yfinance 보강 중...")
+            for tk in mktcap_failed:
+                try:
+                    fi = _yf.Ticker(tk).fast_info
+                    mc = fi.get("market_cap") if hasattr(fi, "get") else getattr(fi, "market_cap", None)
+                    if mc:
+                        mktcap_b_map[tk] = round(float(mc) / 1e9, 2)
+                except Exception as _ye:
+                    pass
+                _time.sleep(0.2)
 
     for tk, s in stats.items():
         s["mktcap_b"] = mktcap_b_map.get(tk)
@@ -988,15 +1024,22 @@ def _load_spx_universe() -> list[str]:
 
 
 def _yf_multiday(tickers: list[str], start: str, end: str) -> dict[str, pd.DataFrame]:
-    """yfinance 배치 다운로드 → {ticker: DataFrame(OHLCV)}."""
+    """yfinance 배치 다운로드 → {ticker: DataFrame(OHLCV)}.
+
+    yfinance는 delisted 종목에 대해 콘솔 경고를 출력하지만 데이터가 없을 뿐
+    실제 처리에는 지장이 없으므로 경고를 억제한다.
+    """
     import yfinance as yf
+    import warnings
     if not tickers:
         return {}
     try:
-        raw = yf.download(
-            tickers, start=start, end=end,
-            progress=False, auto_adjust=True, group_by="ticker",
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            raw = yf.download(
+                tickers, start=start, end=end,
+                progress=False, auto_adjust=True, group_by="ticker",
+            )
     except Exception as e:
         print(f"    [yf multiday ERROR] {e}")
         return {}
@@ -1056,20 +1099,44 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
             )
             session_opened = True
 
-        # ── 시총 배치 수집 (거래대금 상위 100, batch_size=50) ────────────
-        mktcap_batch = 50
+        # ── 시총 배치 수집 (거래대금 상위 100, batch=25 + retry×3 + yfinance fallback) ──
+        import yfinance as _yf_mc
+        mktcap_batch  = 25
+        mktcap_failed: list[str] = []
+
         for i in range(0, len(mktcap_cands), mktcap_batch):
-            batch = mktcap_cands[i:i + mktcap_batch]
-            try:
-                part = ld.get_data(universe=batch, fields=["TR.CompanyMarketCap"])
-                if part is not None and not part.empty:
-                    for _, row in part.iterrows():
-                        ticker = str(row.get("Instrument", "")).strip()
-                        mktcap = row.get("Company Market Cap")
-                        if ticker and pd.notna(mktcap) and mktcap:
-                            result.setdefault(ticker, {})["mktcap_b"] = round(float(mktcap), 2)
-            except Exception as be:
-                print(f"    [LSEG mktcap BATCH ERROR i={i}] {be}")
+            batch   = mktcap_cands[i:i + mktcap_batch]
+            success = False
+            for attempt in range(3):
+                try:
+                    part = ld.get_data(universe=batch, fields=["TR.CompanyMarketCap"])
+                    if part is not None and not part.empty:
+                        for _, row in part.iterrows():
+                            ticker = str(row.get("Instrument", "")).strip()
+                            mktcap = row.get("Company Market Cap")
+                            if ticker and pd.notna(mktcap) and mktcap:
+                                result.setdefault(ticker, {})["mktcap_b"] = round(float(mktcap), 2)
+                    success = True
+                    break
+                except Exception as be:
+                    wait = 2 ** attempt
+                    print(f"    [LSEG mktcap BATCH i={i} attempt={attempt+1}] {be} → retry in {wait}s")
+                    time.sleep(wait)
+            if not success:
+                mktcap_failed.extend(batch)
+            time.sleep(0.5)
+
+        if mktcap_failed:
+            print(f"    [yf mktcap fallback] {len(mktcap_failed)}개 yfinance 보강 중...")
+            for tk in mktcap_failed:
+                try:
+                    fi = _yf_mc.Ticker(tk).fast_info
+                    mc = fi.get("market_cap") if hasattr(fi, "get") else getattr(fi, "market_cap", None)
+                    if mc:
+                        result.setdefault(tk, {})["mktcap_b"] = round(float(mc) / 1e9, 2)
+                except Exception:
+                    pass
+                time.sleep(0.2)
 
         # ── EPS 추정치 배치 수집 (전체 eps_universe, batch_size=20, retry×2) ─
         if fetch_eps:
