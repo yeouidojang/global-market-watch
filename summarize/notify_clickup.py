@@ -27,6 +27,7 @@ if hasattr(sys.stdout, 'buffer') and sys.stdout.encoding.lower() != 'utf-8':
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR.parent / ".env")
 
+import re
 import requests
 
 CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN", "")
@@ -37,6 +38,42 @@ SESSION_LABEL = {
     "asia": "ASIA 시황",
     "us":   "Global 시황",
 }
+
+
+def _normalize_tables(content: str) -> str:
+    """마크다운 테이블 행 컬럼 수를 최댓값으로 통일.
+
+    ClickUp API는 테이블 행 간 컬럼 수 불일치 시 400 반환.
+    LLM이 헤더/구분선을 N컬럼으로 생성했으나 데이터 행에 컬럼을 추가하는 경우 발생.
+    """
+    lines = content.split("\n")
+    result: list[str] = []
+    i = 0
+    while i < len(lines):
+        # 연속된 테이블 행 수집
+        if lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+            table: list[str] = []
+            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                table.append(lines[i])
+                i += 1
+            # 각 행의 컬럼 수 계산 (양쪽 | 제외)
+            col_counts = [row.count("|") - 1 for row in table]
+            max_cols = max(col_counts)
+            fixed: list[str] = []
+            for row, cnt in zip(table, col_counts):
+                if cnt < max_cols:
+                    diff = max_cols - cnt
+                    # 구분선 행 여부 판별 (|---|--- 패턴)
+                    if re.search(r"\|[\s:]*-+[\s:]*\|", row):
+                        row = row.rstrip() + " ---|" * diff
+                    else:
+                        row = row.rstrip() + " |" * diff
+                fixed.append(row)
+            result.extend(fixed)
+        else:
+            result.append(lines[i])
+            i += 1
+    return "\n".join(result)
 
 
 def send_briefing_to_docs(content: str, session: str = "", date: str = "") -> str | None:
@@ -71,7 +108,7 @@ def send_briefing_to_docs(content: str, session: str = "", date: str = "") -> st
     }
     payload = {
         "name":           title,
-        "content":        content,
+        "content":        _normalize_tables(content),
         "content_format": "text/md",
     }
 
