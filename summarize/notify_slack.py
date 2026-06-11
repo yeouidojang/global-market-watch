@@ -32,26 +32,39 @@ SESSION_EMOJI = {
     "us":     "🇺🇸",
 }
 
-MAX_SLACK_LEN = 3000  # Slack 블록 텍스트 한도
+BLOCK_MAX = 3000  # Slack section 블록 1개 한도
+
+
+def _text_to_blocks(text: str) -> list[dict]:
+    """텍스트를 BLOCK_MAX 단위로 나눠 section 블록 리스트 반환 (단락 경계 유지)."""
+    import re
+
+    def make_block(t: str) -> dict:
+        return {"type": "section", "text": {"type": "mrkdwn", "text": t.strip()}}
+
+    if len(text) <= BLOCK_MAX:
+        return [make_block(text)]
+
+    paragraphs = re.split(r'\n{2,}', text)
+    blocks, chunk = [], ""
+    for para in paragraphs:
+        addition = para + "\n\n"
+        if chunk and len(chunk) + len(addition) > BLOCK_MAX:
+            blocks.append(make_block(chunk))
+            chunk = addition
+        else:
+            chunk += addition
+    if chunk.strip():
+        blocks.append(make_block(chunk))
+    return blocks
 
 
 def _send_raw(text: str) -> bool:
-    """Slack Incoming Webhook 발송."""
+    """Slack Incoming Webhook으로 텍스트 1개 메시지 발송."""
     if not WEBHOOK_URL:
         raise RuntimeError("SLACK_WEBHOOK_URL이 .env에 없습니다.")
 
-    payload = {
-        "blocks": [
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": text[:MAX_SLACK_LEN],
-                },
-            }
-        ]
-    }
-
+    payload = {"blocks": _text_to_blocks(text[:BLOCK_MAX * 4])}
     resp = requests.post(
         WEBHOOK_URL,
         data=json.dumps(payload),
@@ -59,21 +72,123 @@ def _send_raw(text: str) -> bool:
         timeout=10,
         verify=False,
     )
-
     if resp.status_code != 200:
         raise RuntimeError(f"Slack 발송 실패: {resp.status_code} {resp.text}")
     return True
 
 
+def _split_by_section(text: str) -> list[str]:
+    """--- 구분선 기준으로 섹션 분리. 빈 섹션 제거."""
+    import re
+    parts = re.split(r'\n{0,2}---\n{0,2}', text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+# Slack 메시지 1개에 담을 권장 길이 (BLOCK_MAX=3000과 가독성 균형)
+PART_TARGET_LEN = 3000
+
+
+def _split_units(text: str) -> list[str]:
+    """본문을 분할 후보 단위(섹션 → 단락)로 분해.
+
+    `---` 우선 분리 후, 단일 섹션이 평균보다 훨씬 길면 빈줄(`\\n\\n`) 단위로
+    추가 분해해 균형 분할이 가능하게 한다.
+    """
+    import re
+    sections = [p.strip() for p in re.split(r'\n{0,2}---\n{0,2}', text) if p.strip()]
+    if not sections:
+        return [text.strip()] if text.strip() else []
+
+    avg_len = sum(len(s) for s in sections) / len(sections)
+    units: list[str] = []
+    for s in sections:
+        # 평균의 2배를 초과하는 큰 섹션만 단락 단위로 추가 분해
+        if len(s) > avg_len * 2.0 and "\n\n" in s:
+            paragraphs = [p.strip() for p in re.split(r'\n{2,}', s) if p.strip()]
+            units.extend(paragraphs)
+        else:
+            units.append(s)
+    return units
+
+
+def _consolidate_parts(units: list[str], target_parts: int | None = None) -> list[str]:
+    """
+    분할 단위 리스트를 길이 기준 묶음으로 통합.
+
+    Parameters
+    ----------
+    units        : _split_units()가 반환한 분할 후보 (섹션 + 단락 혼합)
+    target_parts : 강제 파트 수. None이면 자동(<4500자=2, 그 이상=3).
+                   단위 수가 적으면 그만큼만 생성.
+    """
+    if not units:
+        return []
+
+    sep_len = 2  # "\n\n"
+    total = sum(len(s) for s in units) + max(0, len(units) - 1) * sep_len
+
+    if target_parts is None:
+        target_parts = 3 if total >= PART_TARGET_LEN else 2
+    target_parts = max(1, min(target_parts, len(units)))
+
+    if target_parts == 1:
+        return ["\n\n".join(units)]
+
+    target_len = total / target_parts
+    parts: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for i, unit in enumerate(units):
+        unit_len = len(unit)
+        remaining_units = len(units) - i
+        remaining_parts = target_parts - len(parts)
+        # 끊을 조건: (a) 추가하면 목표보다 더 멀어지거나 (b) 이미 목표 초과
+        would_be = current_len + (sep_len if current_len else 0) + unit_len
+        should_break = (
+            current
+            and remaining_units > remaining_parts - 1
+            and (
+                current_len >= target_len
+                or abs(would_be - target_len) > abs(current_len - target_len)
+            )
+        )
+        if should_break:
+            parts.append("\n\n".join(current))
+            current = [unit]
+            current_len = unit_len
+        else:
+            current.append(unit)
+            current_len += unit_len + (sep_len if current_len else 0)
+    if current:
+        parts.append("\n\n".join(current))
+
+    # 마지막 파트가 너무 짧으면(목표의 1/4 미만) 직전 파트에 흡수
+    if len(parts) >= 2 and len(parts[-1]) < target_len * 0.25:
+        last = parts.pop()
+        parts[-1] = parts[-1] + "\n\n" + last
+    return parts
+
+
 def _markdown_to_slack(md: str) -> str:
-    """기본 Markdown → Slack mrkdwn 변환."""
+    """Markdown → Slack mrkdwn 변환.
+    - ## / ### 헤더  →  *bold*
+    - **text**       →  *text*  (Slack은 ** 미지원)
+    - |:---|---:| 구분자 행 제거 (테이블 정렬 노이즈 제거)
+    """
+    import re
     lines = []
     for line in md.splitlines():
-        if line.startswith("## "):
-            lines.append(f"*{line[3:]}*")
-        elif line.startswith("**") and line.endswith("**"):
-            lines.append(line)  # bold 유지
+        s = line.strip()
+        # 테이블 구분자 행 (|:---|---:| 등) 제거
+        if s.startswith("|") and s.endswith("|") and all(c in "|-: " for c in s):
+            continue
+        if line.startswith("### "):
+            lines.append(f"*{line[4:].strip()}*")
+        elif line.startswith("## "):
+            lines.append(f"*{line[3:].strip()}*")
         else:
+            # **bold** → *bold*
+            line = re.sub(r'\*\*(.+?)\*\*', r'*\1*', line)
             lines.append(line)
     return "\n".join(lines)
 
@@ -114,18 +229,29 @@ def send_briefing(briefing_id: int = None, text: str = None,
     else:
         raise ValueError("briefing_id 또는 text 중 하나 필요")
 
-    emoji  = SESSION_EMOJI.get(session, "📊")
-    header = f"{emoji} *{date} {session.upper()} 시황 브리핑*\n{'─' * 40}\n"
-    body   = _markdown_to_slack(content)
-    full   = header + body
+    emoji    = SESSION_EMOJI.get(session, "📊")
+    header   = f"{emoji} *{date} {session.upper()} 시황 브리핑*\n{'─' * 40}"
+    body     = _markdown_to_slack(content)
+    units    = _split_units(body)
+    parts    = _consolidate_parts(units) or [body]
 
-    ok = _send_raw(full)
+    # 첫 파트와 헤더 합쳐서 메시지 1개로 보낼 수 있으면 합치고, 아니면 헤더 단독 발송
+    first = parts[0]
+    if len(header) + 2 + len(first) <= BLOCK_MAX * 2:
+        messages = [f"{header}\n\n{first}"] + parts[1:]
+    else:
+        messages = [header] + parts
 
-    if ok and briefing_id:
+    for i, msg in enumerate(messages, 1):
+        _send_raw(msg)
+        print(f"[notify_slack] {i}/{len(messages)} 발송 ({len(msg):,}자)")
+
+    if briefing_id:
         db.mark_notified(briefing_id)
-        print(f"[notify_slack] id={briefing_id} Slack 발송 완료 ✓")
+    print(f"[notify_slack] id={briefing_id} 완료 (분할단위 {len(units)} → {len(parts)}파트, "
+          f"메시지 {len(messages)}개) ✓")
 
-    return ok
+    return True
 
 
 def send_text(text: str) -> bool:

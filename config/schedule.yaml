@@ -3,21 +3,15 @@
 
 triggers:
   asia_close:
-    hour: 15
-    minute: 40
+    hour: 16
+    minute: 10
     label: "아시아 마감"
     session: asia
 
-  europe_close:
-    hour: 1
-    minute: 40
-    label: "유럽 마감"
-    session: europe
-
-  us_close:
+  global_close:
     hour: 6
     minute: 10
-    label: "미국 마감 + 글로벌 브리핑"
-    session: us
+    label: "유럽+미국 통합 브리핑"
+    sessions: [europe, us]   # europe 데이터/브리핑 컨텍스트 생성 → us에서 통합 Slack 발송
 
 timezone: "Asia/Seoul"

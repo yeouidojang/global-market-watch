@@ -10,16 +10,18 @@ asia:
       source: pykrx
       krx_ticker: "2001"
   japan:
-    - ticker: "^N225"
+    # NEXT FUNDS Nikkei 225 ETF (1321.T) — ^N225보다 안정적이고
+    # ^N225가 누락하는 날짜(예: 2026-06-10)도 정상 커버. 등락률은 N225와 동일.
+    - ticker: "1321.T"
       name: Nikkei225
       source: yfinance
     - ric: ".TOPX"
       name: TOPIX
       source: lseg
   china:
-    - ticker: "000300.SS"
+    - ric: ".CSI300"
       name: CSI300
-      source: yfinance
+      source: lseg
     - ticker: "^HSI"
       name: HangSeng
       source: yfinance

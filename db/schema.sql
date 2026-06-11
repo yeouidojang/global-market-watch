@@ -84,6 +84,24 @@ CREATE TABLE IF NOT EXISTS eps_cache (
     PRIMARY KEY (ticker)
 );
 
+-- 어닝 캘린더 (Finnhub earnings_calendar)
+CREATE TABLE IF NOT EXISTS earnings_calendar (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_date       TEXT NOT NULL,          -- YYYY-MM-DD (발표일)
+    hour             TEXT,                   -- bmo (장전) | amc (장후) | dmh (장중) | ''
+    symbol           TEXT NOT NULL,          -- yfinance ticker (AAPL, NVDA, BRK-B 등)
+    year             INTEGER,                -- 회계연도
+    quarter          INTEGER,                -- 분기 (1~4)
+    eps_estimate     REAL,
+    eps_actual       REAL,
+    revenue_estimate REAL,                   -- USD
+    revenue_actual   REAL,                   -- USD
+    surprise_pct     REAL,                   -- (actual - estimate) / |estimate| * 100
+    source           TEXT DEFAULT 'finnhub',
+    created_at       TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE (event_date, symbol)
+);
+
 -- 인덱스
 CREATE INDEX IF NOT EXISTS idx_market_daily_date   ON market_daily(date);
 CREATE INDEX IF NOT EXISTS idx_market_daily_name   ON market_daily(name);
@@ -94,3 +112,5 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_econ_unique
 CREATE INDEX IF NOT EXISTS idx_econ_importance ON econ_calendar(importance);
 CREATE INDEX IF NOT EXISTS idx_eps_cache_date    ON eps_cache(fetched_date);
 CREATE INDEX IF NOT EXISTS idx_stocks_daily_date ON stocks_daily(date, session);
+CREATE INDEX IF NOT EXISTS idx_earnings_cal_date   ON earnings_calendar(event_date);
+CREATE INDEX IF NOT EXISTS idx_earnings_cal_symbol ON earnings_calendar(symbol);

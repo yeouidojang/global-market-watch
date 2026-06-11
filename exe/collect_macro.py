@@ -474,7 +474,105 @@ def collect_macro(target_date: str, cfg: dict, db: DBManager) -> int:
                     "volume":   row.get("volume"),
                 })
 
+    # KRX 항목 (VKOSPI 등)
+    krx_items = [i for i in cfg.get("volatility", []) if i.get("source") == "krx"]
+    for item in krx_items:
+        name = item["name"]
+        kind = item.get("kind", "vkospi")
+        if kind == "vkospi":
+            rows = fetch_krx_vkospi(target_date)
+        else:
+            print(f"  [macro KRX] 알 수 없는 kind={kind} (skip)")
+            continue
+        if rows:
+            print(f"  [macro KRX] {name}: {len(rows)}건")
+        for row in rows:
+            records.append({
+                "date":     row.get("date", target_date),
+                "session":  "macro",
+                "category": "volatility",
+                "name":     name,
+                "close":    row.get("close"),
+                "open":     row.get("open"),
+                "high":     row.get("high"),
+                "low":      row.get("low"),
+                "volume":   row.get("volume"),
+            })
+
     return db.upsert_market_daily(records)
+
+
+# ------------------------------------------------------------------ #
+#  KRX 정보데이터시스템 직접 호출 (VKOSPI 등 일반 인덱스 외 시계열)
+# ------------------------------------------------------------------ #
+_KRX_MDC_URL = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
+
+# KRX MDCSTAT의 V-KOSPI 200 시계열 (idxIndMidclssCd=03, indIdx2=300)
+_KRX_VKOSPI_PARAMS = {
+    "bld":               "dbms/MDC/STAT/standard/MDCSTAT00301",
+    "idxIndMidclssCd":   "03",
+    "tboxindIdx_finder_equidx0_0": "V-KOSPI 200",
+    "indIdx":            "1",
+    "indIdx2":           "300",
+    "codeNmindIdx_finder_equidx0_0": "V-KOSPI 200",
+    "param1indIdx_finder_equidx0_0": "",
+    "share":             "2",
+    "money":             "3",
+    "csvxls_isNo":       "false",
+}
+
+
+def fetch_krx_vkospi(target_date: str, lookback_days: int = 7) -> list[dict]:
+    """
+    KRX 정보데이터시스템에서 V-KOSPI 200 OHLC 시계열 수집.
+
+    Returns
+    -------
+    list[dict]  [{date, close, open, high, low, volume}]
+    """
+    s = _get_krx_session()
+    end = pd.Timestamp(target_date).strftime("%Y%m%d")
+    start = (pd.Timestamp(target_date) - pd.Timedelta(days=lookback_days)).strftime("%Y%m%d")
+
+    params = dict(_KRX_VKOSPI_PARAMS)
+    params["strtDd"] = start
+    params["endDd"]  = end
+
+    hdrs = {
+        "User-Agent": _KRX_UA,
+        "Referer":    "https://data.krx.co.kr/contents/MDC/MDI/mdiLoader/index.cmd",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    try:
+        r = s.post(_KRX_MDC_URL, data=params, headers=hdrs, timeout=15)
+        r.raise_for_status()
+        rows = r.json().get("output", [])
+    except Exception as e:
+        print(f"  [KRX VKOSPI ERROR] {e}")
+        return []
+
+    def _f(v):
+        if v in (None, "", "-"):
+            return None
+        try:
+            return float(str(v).replace(",", ""))
+        except (TypeError, ValueError):
+            return None
+
+    out = []
+    for row in rows:
+        d = row.get("TRD_DD", "").replace("/", "-")
+        if not d:
+            continue
+        out.append({
+            "date":   d,
+            "close":  _f(row.get("CLSPRC_IDX")),
+            "open":   _f(row.get("OPNPRC_IDX")),
+            "high":   _f(row.get("HGPRC_IDX")),
+            "low":    _f(row.get("LWPRC_IDX")),
+            "volume": None,  # VKOSPI는 거래량 없음
+        })
+    return out
 
 
 # ------------------------------------------------------------------ #

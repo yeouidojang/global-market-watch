@@ -282,11 +282,92 @@ class DBManager:
         conn.close()
 
     # ------------------------------------------------------------------ #
+    #  earnings_calendar
+    # ------------------------------------------------------------------ #
+    def upsert_earnings_event(self, records: list[dict]) -> int:
+        if not records:
+            return 0
+        for r in records:
+            r.setdefault("hour", None)
+            r.setdefault("year", None)
+            r.setdefault("quarter", None)
+            r.setdefault("eps_estimate", None)
+            r.setdefault("eps_actual", None)
+            r.setdefault("revenue_estimate", None)
+            r.setdefault("revenue_actual", None)
+            r.setdefault("surprise_pct", None)
+            r.setdefault("source", "finnhub")
+            for k, v in list(r.items()):
+                if isinstance(v, float) and pd.isna(v):
+                    r[k] = None
+
+        sql = """
+            INSERT INTO earnings_calendar
+                (event_date, hour, symbol, year, quarter,
+                 eps_estimate, eps_actual, revenue_estimate, revenue_actual,
+                 surprise_pct, source)
+            VALUES
+                (:event_date, :hour, :symbol, :year, :quarter,
+                 :eps_estimate, :eps_actual, :revenue_estimate, :revenue_actual,
+                 :surprise_pct, :source)
+            ON CONFLICT(event_date, symbol) DO UPDATE SET
+                hour             = COALESCE(excluded.hour,             hour),
+                year             = COALESCE(excluded.year,             year),
+                quarter          = COALESCE(excluded.quarter,          quarter),
+                eps_estimate     = COALESCE(excluded.eps_estimate,     eps_estimate),
+                eps_actual       = COALESCE(excluded.eps_actual,       eps_actual),
+                revenue_estimate = COALESCE(excluded.revenue_estimate, revenue_estimate),
+                revenue_actual   = COALESCE(excluded.revenue_actual,   revenue_actual),
+                surprise_pct     = COALESCE(excluded.surprise_pct,     surprise_pct),
+                source           = excluded.source
+        """
+        conn = self._connect()
+        cursor = conn.executemany(sql, records)
+        conn.commit()
+        count = cursor.rowcount
+        conn.close()
+        return count
+
+    def get_upcoming_earnings(self, from_date: str, days: int = 7,
+                              symbols: list[str] | None = None,
+                              limit: int | None = None) -> pd.DataFrame:
+        """
+        from_date 이후 days일 이내 어닝 이벤트 반환.
+        symbols 지정 시 해당 종목만, limit 지정 시 결과 행 수 제한.
+        """
+        base_sql = """
+            SELECT event_date, hour, symbol, year, quarter,
+                   eps_estimate, eps_actual, revenue_estimate, revenue_actual,
+                   surprise_pct
+            FROM earnings_calendar
+            WHERE event_date >= :from_date
+              AND event_date <= date(:from_date, '+' || :days || ' days')
+        """
+        params = {"from_date": from_date, "days": days}
+        if symbols:
+            placeholders = ",".join(f":s{i}" for i in range(len(symbols)))
+            base_sql += f" AND symbol IN ({placeholders})"
+            for i, sym in enumerate(symbols):
+                params[f"s{i}"] = sym
+        base_sql += " ORDER BY event_date, hour, symbol"
+        if limit:
+            base_sql += f" LIMIT {int(limit)}"
+
+        conn = self._connect()
+        df = pd.read_sql_query(base_sql, conn, params=params)
+        conn.close()
+        return df
+
+    # ------------------------------------------------------------------ #
     #  stocks_daily
     # ------------------------------------------------------------------ #
     @staticmethod
     def _stocks_data_to_records(date: str, session: str, stocks_data: dict) -> list[dict]:
-        """stocks_data dict → stocks_daily 삽입용 레코드 리스트."""
+        """stocks_data dict → stocks_daily 삽입용 레코드 리스트.
+
+        주의: upsert_stocks_daily()에서 누락 키를 None으로 정규화하므로
+        각 카테고리에서는 해당 카테고리에 의미 있는 필드만 채우면 된다.
+        """
         records = []
 
         # ── Asia ────────────────────────────────────────────────────────
@@ -297,9 +378,6 @@ class DBManager:
                 "market": s.get("market"), "close": s.get("close"),
                 "chg_pct": s.get("chg_pct"), "trade_val": s.get("trade_val"),
                 "mktcap": s.get("mktcap"),
-                "volume": None, "dollar_vol_b": None, "mktcap_b": None,
-                "turnover": None, "surge_ratio": None,
-                "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "foreign_net": None, "inst_net": None, "signal": None,
             })
         for s in stocks_data.get("featured", []):
             records.append({
@@ -309,9 +387,7 @@ class DBManager:
                 "chg_pct": s.get("chg_pct"), "trade_val": s.get("trade_val"),
                 "turnover": s.get("turnover"),
                 "foreign_net": s.get("foreign_net"), "inst_net": s.get("inst_net"),
-                "mktcap": None, "volume": None, "dollar_vol_b": None,
-                "mktcap_b": None, "surge_ratio": None,
-                "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "signal": s.get("signal"),
+                "signal": s.get("signal"),
             })
 
         # ── Asia investor_flow (전 종목 외인/기관 순매수) ────────────────
@@ -322,10 +398,6 @@ class DBManager:
                 "foreign_net": s.get("foreign_net"), "inst_net": s.get("inst_net"),
                 "close": s.get("close"), "chg_pct": s.get("chg_pct"),
                 "market": s.get("market"),
-                "volume": None, "trade_val": None, "dollar_vol_b": None,
-                "mktcap": None, "mktcap_b": None, "turnover": None,
-                "surge_ratio": None, "eps_chg_1m": None, "eps_chg_1w": None,
-                "return_7d": None, "signal": None,
             })
 
         # ── Europe ──────────────────────────────────────────────────────
@@ -335,10 +407,6 @@ class DBManager:
                     "date": date, "session": session, "category": "sectors",
                     "ticker": s.get("ric", s.get("ticker", "")), "name": s.get("name"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
-                    "market": None, "volume": None, "trade_val": None,
-                    "dollar_vol_b": None, "mktcap": None, "mktcap_b": None,
-                    "turnover": None, "surge_ratio": None,
-                    "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "foreign_net": None, "inst_net": None, "signal": None,
                 })
         for s in stocks_data.get("top_stocks", []):
             records.append({
@@ -346,9 +414,6 @@ class DBManager:
                 "ticker": s.get("ric", s.get("ticker", "")), "name": s.get("name"),
                 "close": s.get("close"), "chg_pct": s.get("chg_pct"),
                 "volume": s.get("volume"),
-                "market": None, "trade_val": None, "dollar_vol_b": None,
-                "mktcap": None, "mktcap_b": None, "turnover": None,
-                "surge_ratio": None, "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "foreign_net": None, "inst_net": None, "signal": None,
             })
 
         # ── US ──────────────────────────────────────────────────────────
@@ -358,10 +423,6 @@ class DBManager:
                     "date": date, "session": session, "category": "sectors",
                     "ticker": s.get("ticker", ""), "name": s.get("name"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
-                    "market": None, "volume": None, "trade_val": None,
-                    "dollar_vol_b": None, "mktcap": None, "mktcap_b": None,
-                    "turnover": None, "surge_ratio": None,
-                    "eps_chg_1m": None, "eps_chg_1w": None, "return_7d": None, "foreign_net": None, "inst_net": None, "signal": None,
                 })
         for cat in ("mktcap_top", "tradeval_top", "turnover_surge", "eps_revision"):
             for s in stocks_data.get(cat, []):
@@ -373,8 +434,40 @@ class DBManager:
                     "surge_ratio": s.get("surge_ratio"),
                     "eps_chg_1m": s.get("eps_chg_1m"), "eps_chg_1w": s.get("eps_chg_1w"),
                     "return_7d": s.get("return_7d"), "signal": s.get("signal"),
-                    "market": None, "volume": None, "trade_val": None,
-                    "mktcap": None, "turnover": None,
+                })
+
+        # ── Asia Overseas (JP/CN/HK) — major / featured / sectors ─────
+        for mk, mk_data in stocks_data.get("overseas_asia", {}).items():
+            if not isinstance(mk_data, dict):
+                continue
+            for s in mk_data.get("major", []):
+                records.append({
+                    "date": date, "session": session, "category": f"{mk}_major",
+                    "ticker": s.get("ticker", ""), "name": s.get("name"),
+                    "market": s.get("sector"),
+                    "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "mktcap_b": s.get("mktcap_b"),
+                    "dollar_vol_b": s.get("trade_val_b"),
+                })
+            for s in mk_data.get("featured", []):
+                records.append({
+                    "date": date, "session": session, "category": f"{mk}_featured",
+                    "ticker": s.get("ticker", ""), "name": s.get("name"),
+                    "market": s.get("sector"),
+                    "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "surge_ratio": s.get("surge_ratio"),
+                    "dollar_vol_b": s.get("trade_val_b"),
+                    "signal": s.get("signal"),
+                })
+            for s in mk_data.get("sectors", []):
+                records.append({
+                    "date": date, "session": session, "category": f"{mk}_sectors",
+                    "ticker": s.get("sector", ""),         # 섹터명을 ticker로
+                    "name":   s.get("sector"),
+                    "chg_pct":  s.get("chg_wmean") or s.get("chg_avg"),
+                    "mktcap_b": s.get("mktcap_b"),
+                    "volume":   s.get("n"),                 # 종목수를 volume에
+                    "signal":   f"avg {s.get('chg_avg')}%",
                 })
 
         return records
@@ -398,11 +491,33 @@ class DBManager:
             result[cat] = [_clean(r) for r in items]
         return result
 
+    # stocks_daily 바인딩 키 (Asia 전용 필드 포함). 누락된 키는 None으로 자동 채움.
+    _STOCKS_DAILY_KEYS = (
+        "date", "session", "category", "ticker", "name", "market",
+        "close", "chg_pct", "volume", "trade_val", "dollar_vol_b",
+        "mktcap", "mktcap_b", "turnover", "surge_ratio",
+        "eps_chg_1m", "eps_chg_1w", "return_7d",
+        "foreign_net", "inst_net", "signal",
+    )
+
     def upsert_stocks_daily(self, date: str, session: str, stocks_data: dict) -> int:
         """stocks_data dict를 stocks_daily 테이블에 upsert."""
         records = self._stocks_data_to_records(date, session, stocks_data)
         if not records:
             return 0
+
+        # 모든 레코드에 누락 키를 None으로 채워 SQL 바인딩 누락 방지
+        # (foreign_net/inst_net은 Asia 전용 — US/Europe에서는 자동 None)
+        normalized = []
+        for r in records:
+            row = {k: r.get(k) for k in self._STOCKS_DAILY_KEYS}
+            # pandas NA/NaN → None
+            for k, v in row.items():
+                if isinstance(v, float) and pd.isna(v):
+                    row[k] = None
+            normalized.append(row)
+        records = normalized
+
         sql = """
             INSERT INTO stocks_daily
                 (date, session, category, ticker, name, market,

@@ -2,6 +2,9 @@
 # source: lseg | yfinance | fred
 
 fx:
+  - ticker: "DX-Y.NYB"
+    name: DXY
+    source: yfinance
   - ric: "KRW="
     name: USD_KRW
     source: lseg
@@ -50,3 +53,6 @@ volatility:
   - ticker: "^MOVE"
     name: MOVE
     source: yfinance
+  - name: VKOSPI
+    source: krx
+    kind: vkospi

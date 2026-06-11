@@ -48,20 +48,27 @@ def fetch_top_stocks(
     n_featured: int = 10,
 ) -> dict:
     """
-    KOSPI+KOSDAQ 주요 종목 / 특징주 수집.
+    KOSPI/KOSDAQ 주요 종목 / 특징주 수집 (시장별 분리 분석).
 
     Parameters
     ----------
     target_date  : YYYY-MM-DD
     min_trade_val: 최소 거래대금 필터 (기본 50억)
-    n_major      : 주요 종목 수
-    n_featured   : 특징주 수
+    n_major      : **시장별** 주요 종목 수 (KOSPI N + KOSDAQ N)
+    n_featured   : **시장별** 특징주 수 (KOSPI N + KOSDAQ N)
 
     Returns
     -------
     {
-      "major":    [{"ticker", "name", "close", "chg_pct", "trade_val", "mktcap"}, ...],
-      "featured": [{"ticker", "name", "close", "chg_pct", "trade_val", "turnover", "signal"}, ...]
+      # 시장별 분리 키 (LLM 렌더링용)
+      "major_kospi": [...], "major_kosdaq": [...],
+      "featured_kospi": [...], "featured_kosdaq": [...],
+      "breadth_kospi": {...}, "breadth_kosdaq": {...},
+      "market_flow_kospi": {...}, "market_flow_kosdaq": {...},
+
+      # 통합 키 (DB 저장·기존 호환)
+      "major": [...], "featured": [...], "investor_flow": [...],
+      "breadth": {...}, "market_flow": {...},
     }
     """
     orig = _patch_webio()
@@ -108,69 +115,89 @@ def fetch_top_stocks(
         except Exception as _e:
             print(f"  [asia stocks market_daily ERROR] {_e}")
 
-        # ── 시장 폭 계산 ─────────────────────────────────────────────
-        valid  = ohlcv[ohlcv["close"] > 0].copy()
-        up     = int((valid["chg_pct"] > 0).sum())
-        down   = int((valid["chg_pct"] < 0).sum())
-        flat   = int((valid["chg_pct"] == 0).sum())
-        total  = up + down + flat
-        tv_sum = float(valid["trade_val"].sum())
-        breadth = {
-            "up": up, "down": down, "flat": flat, "total": total,
-            "up_pct":       round(up / total * 100, 1) if total > 0 else None,
-            "adr":          round(up / down, 2)         if down > 0 else None,
-            "weighted_chg": round(
-                (valid["chg_pct"] * valid["trade_val"]).sum() / tv_sum, 2
-            ) if tv_sum > 0 else None,
-        }
+        # ── 시장 폭 헬퍼 ─────────────────────────────────────────────
+        def _compute_breadth(df_market: pd.DataFrame) -> dict:
+            v = df_market[df_market["close"] > 0]
+            up    = int((v["chg_pct"] > 0).sum())
+            down  = int((v["chg_pct"] < 0).sum())
+            flat  = int((v["chg_pct"] == 0).sum())
+            total = up + down + flat
+            tv    = float(v["trade_val"].sum())
+            return {
+                "up": up, "down": down, "flat": flat, "total": total,
+                "up_pct":       round(up / total * 100, 1) if total > 0 else None,
+                "adr":          round(up / down, 2)         if down > 0 else None,
+                "weighted_chg": round((v["chg_pct"] * v["trade_val"]).sum() / tv, 2)
+                                if tv > 0 else None,
+            }
+
+        valid = ohlcv[ohlcv["close"] > 0].copy()
+        breadth        = _compute_breadth(valid)
+        breadth_kospi  = _compute_breadth(valid[valid["market"] == "KOSPI"])
+        breadth_kosdaq = _compute_breadth(valid[valid["market"] == "KOSDAQ"])
 
         # ── 2. 투자자별 순매수 (외국인·기관, 전 종목) ────────────────
-        inv_map = {}   # {ticker: {"foreign_net": int, "inst_net": int}}
+        inv_map = {}      # 전체: {ticker: {"foreign_net": int, "inst_net": int}}
+        inv_by_market = {"KOSPI": {}, "KOSDAQ": {}}
         try:
-            inv_dfs = []
-            for market in ("KOSPI", "KOSDAQ"):
+            def _fetch_inv(market: str, investor: str) -> dict[str, int]:
+                """ticker → 순매수거래대금 dict."""
                 try:
-                    df_inv = stock.get_market_net_purchases_of_equities_by_ticker(
-                        date_str, date_str, market
+                    df = stock.get_market_net_purchases_of_equities_by_ticker(
+                        date_str, date_str, market, investor
                     )
-                    if df_inv is not None and not df_inv.empty and len(df_inv.columns) > 0:
-                        df_inv.index.name = "ticker"
-                        df_inv = df_inv.reset_index()
-                        df_inv["_market"] = market
-                        inv_dfs.append(df_inv)
                 except Exception as _me:
-                    print(f"  [pykrx investor {market} ERROR] {_me}")
-            if inv_dfs:
-                inv_all = pd.concat(inv_dfs, ignore_index=True)
-                # 컬럼명 동적 탐지: 외국인/외국인합계, 기관합계/기관
-                cols = inv_all.columns.tolist()
-                foreign_col = next((c for c in cols if "외국인" in c), None)
-                inst_col    = next((c for c in cols if "기관" in c and "합계" in c), None) \
-                           or next((c for c in cols if "기관" in c), None)
-                if foreign_col and inst_col:
-                    for _, row in inv_all.iterrows():
-                        t = row["ticker"]
-                        inv_map[t] = {
-                            "foreign_net": int(row[foreign_col]) if pd.notna(row[foreign_col]) else None,
-                            "inst_net":    int(row[inst_col])    if pd.notna(row[inst_col])    else None,
-                        }
-                    print(f"  [asia investor] 수급 조회 완료: {len(inv_map)}개 종목 "
-                          f"(외인={foreign_col}, 기관={inst_col})")
-                else:
-                    print(f"  [asia investor] 컬럼 탐지 실패: {cols[:10]}")
+                    print(f"  [pykrx investor {market}/{investor} ERROR] {_me}")
+                    return {}
+                if df is None or df.empty:
+                    return {}
+                cols = df.columns.tolist()
+                net_col = next((c for c in cols if "순매수거래대금" in c), None) \
+                       or next((c for c in cols if "순매수" in c and "대금" in c), None)
+                if not net_col:
+                    print(f"  [pykrx investor {market}/{investor}] net 컬럼 없음: {cols[:8]}")
+                    return {}
+                out = {}
+                for ticker, row in df.iterrows():
+                    v = row[net_col]
+                    if pd.notna(v):
+                        out[str(ticker)] = int(v)
+                return out
+
+            for market in ("KOSPI", "KOSDAQ"):
+                f_map = _fetch_inv(market, "외국인")
+                i_map = _fetch_inv(market, "기관합계")
+                tickers = set(f_map.keys()) | set(i_map.keys())
+                for t in tickers:
+                    rec = {
+                        "foreign_net": f_map.get(t),
+                        "inst_net":    i_map.get(t),
+                    }
+                    inv_map[t] = rec
+                    inv_by_market[market][t] = rec
+            if inv_map:
+                n_f = sum(1 for v in inv_map.values() if v["foreign_net"] is not None)
+                n_i = sum(1 for v in inv_map.values() if v["inst_net"]    is not None)
+                print(f"  [asia investor] 수급 조회 완료: {len(inv_map)}개 종목 "
+                      f"(외인 {n_f}개, 기관 {n_i}개)  "
+                      f"KOSPI {len(inv_by_market['KOSPI'])} / KOSDAQ {len(inv_by_market['KOSDAQ'])}")
         except Exception as _ie:
             print(f"  [asia investor ERROR] {_ie}")
 
         # ── 시장 전체 수급 집계 ───────────────────────────────────────
-        market_flow: dict = {}
-        if inv_map:
-            fn_list = [v["foreign_net"] for v in inv_map.values() if v.get("foreign_net") is not None]
-            it_list = [v["inst_net"]    for v in inv_map.values() if v.get("inst_net")    is not None]
-            market_flow = {
-                "foreign_net": sum(fn_list) if fn_list else None,
-                "inst_net":    sum(it_list) if it_list else None,
-                "n_stocks":    len(inv_map),
+        def _flow_sum(mp: dict) -> dict:
+            if not mp:
+                return {}
+            fn = [v["foreign_net"] for v in mp.values() if v.get("foreign_net") is not None]
+            it = [v["inst_net"]    for v in mp.values() if v.get("inst_net")    is not None]
+            return {
+                "foreign_net": sum(fn) if fn else None,
+                "inst_net":    sum(it) if it else None,
+                "n_stocks":    len(mp),
             }
+        market_flow        = _flow_sum(inv_map)
+        market_flow_kospi  = _flow_sum(inv_by_market["KOSPI"])
+        market_flow_kosdaq = _flow_sum(inv_by_market["KOSDAQ"])
 
         # ── 3. 시가총액 + 상장주식수 ─────────────────────────────────
         caps = []
@@ -184,112 +211,427 @@ def fetch_top_stocks(
         cap = cap.reset_index()[["ticker", "시가총액", "상장주식수"]]
         cap = cap.rename(columns={"시가총액": "mktcap", "상장주식수": "shares"})
 
-        # ── 3. 병합 + 필터 ───────────────────────────────────────────
+        # ── 4. 병합 + 필터 ───────────────────────────────────────────
         merged = ohlcv.merge(cap, on="ticker", how="left")
         merged = merged[merged["trade_val"] >= min_trade_val].copy()
         merged = merged[merged["close"] > 0].copy()
 
-        # 종목명 조회 (상위 후보만)
-        top_tickers = set(
-            merged.nlargest(n_major * 3, "mktcap")["ticker"].tolist()
-            + merged.nlargest(n_major * 3, "trade_val")["ticker"].tolist()
-            + merged.nlargest(n_featured * 3, "chg_pct")["ticker"].tolist()
-            + merged.nsmallest(n_featured * 3, "chg_pct")["ticker"].tolist()
-        )
-        name_map = {}
-        for t in top_tickers:
-            try:
-                name_map[t] = stock.get_market_ticker_name(t)
-            except Exception:
-                name_map[t] = t
-        merged["name"] = merged["ticker"].map(lambda t: name_map.get(t, t))
+        # ── 5. 시장별 분석 함수 ──────────────────────────────────────
+        def _analyze_market(m_df: pd.DataFrame, market_name: str) -> tuple[list, list]:
+            """단일 시장에 대해 주요 종목 + 특징주 산출."""
+            if m_df.empty:
+                return [], []
 
-        # 거래량 회전율 (클수록 거래량 급증)
-        merged["turnover"] = merged.apply(
-            lambda r: r["volume"] / r["shares"] * 100 if r["shares"] > 0 else 0, axis=1
-        )
+            # 종목명 조회 (상위 후보만)
+            top_tickers = set(
+                m_df.nlargest(n_major * 3, "mktcap")["ticker"].tolist()
+                + m_df.nlargest(n_major * 3, "trade_val")["ticker"].tolist()
+                + m_df.nlargest(n_featured * 3, "chg_pct")["ticker"].tolist()
+                + m_df.nsmallest(n_featured * 3, "chg_pct")["ticker"].tolist()
+            )
+            name_map_local = {}
+            for t in top_tickers:
+                try:
+                    name_map_local[t] = stock.get_market_ticker_name(t)
+                except Exception:
+                    name_map_local[t] = t
+            m_df = m_df.copy()
+            m_df["name"] = m_df["ticker"].map(lambda t: name_map_local.get(t, t))
+            m_df["turnover"] = m_df.apply(
+                lambda r: r["volume"] / r["shares"] * 100 if r["shares"] > 0 else 0, axis=1
+            )
 
-        # ── 4. 주요 종목: 시총순위 + 거래대금순위 합산 ───────────────
-        merged["rank_cap"]   = merged["mktcap"].rank(ascending=False)
-        merged["rank_trade"] = merged["trade_val"].rank(ascending=False)
-        merged["major_score"] = merged["rank_cap"] + merged["rank_trade"]
-        major_df = merged.nsmallest(n_major, "major_score")
+            # 주요 종목: 시총순위 + 거래대금순위 합산
+            m_df["rank_cap"]    = m_df["mktcap"].rank(ascending=False)
+            m_df["rank_trade"]  = m_df["trade_val"].rank(ascending=False)
+            m_df["major_score"] = m_df["rank_cap"] + m_df["rank_trade"]
+            major_df = m_df.nsmallest(n_major, "major_score")
 
-        major = []
-        for _, r in major_df.iterrows():
-            major.append({
-                "ticker":    r["ticker"],
-                "name":      r["name"],
-                "market":    r["market"],
-                "close":     int(r["close"]),
-                "chg_pct":   round(float(r["chg_pct"]), 2),
-                "trade_val": int(r["trade_val"]),
-                "mktcap":    int(r["mktcap"]),
-            })
+            major_list = []
+            for _, r in major_df.iterrows():
+                major_list.append({
+                    "ticker":    r["ticker"],
+                    "name":      r["name"],
+                    "market":    market_name,
+                    "close":     int(r["close"]),
+                    "chg_pct":   round(float(r["chg_pct"]), 2),
+                    "trade_val": int(r["trade_val"]),
+                    "mktcap":    int(r["mktcap"]),
+                })
 
-        # ── 5. 특징주: |등락률| + 회전율 합산 스코어 ─────────────────
-        merged["abs_chg"]      = merged["chg_pct"].abs()
-        merged["rank_abs_chg"] = merged["abs_chg"].rank(ascending=False)
-        merged["rank_turn"]    = merged["turnover"].rank(ascending=False)
-        merged["feat_score"]   = merged["rank_abs_chg"] + merged["rank_turn"]
+            # 특징주: |등락률| + 회전율 합산
+            m_df["abs_chg"]      = m_df["chg_pct"].abs()
+            m_df["rank_abs_chg"] = m_df["abs_chg"].rank(ascending=False)
+            m_df["rank_turn"]    = m_df["turnover"].rank(ascending=False)
+            m_df["feat_score"]   = m_df["rank_abs_chg"] + m_df["rank_turn"]
 
-        # 등락률 ±3% 이상이거나 회전율 상위 20% 종목만 특징주 후보
-        turn_threshold = merged["turnover"].quantile(0.80)
-        candidates = merged[
-            (merged["abs_chg"] >= 3.0) | (merged["turnover"] >= turn_threshold)
-        ]
-        feat_df = candidates.nsmallest(n_featured, "feat_score")
+            turn_threshold = m_df["turnover"].quantile(0.80)
+            candidates = m_df[
+                (m_df["abs_chg"] >= 3.0) | (m_df["turnover"] >= turn_threshold)
+            ]
+            feat_df = candidates.nsmallest(n_featured, "feat_score")
 
-        featured = []
-        for _, r in feat_df.iterrows():
-            signals = []
-            if r["chg_pct"] >= 3.0:
-                signals.append("급등")
-            elif r["chg_pct"] <= -3.0:
-                signals.append("급락")
-            if r["turnover"] >= turn_threshold:
-                signals.append("거래량급증")
-            inv = inv_map.get(r["ticker"], {})
-            fn, it = inv.get("foreign_net"), inv.get("inst_net")
-            if fn is not None and fn > 0:   signals.append("외인매수")
-            elif fn is not None and fn < 0: signals.append("외인매도")
-            if it is not None and it > 0:   signals.append("기관매수")
-            elif it is not None and it < 0: signals.append("기관매도")
-            featured.append({
-                "ticker":      r["ticker"],
-                "name":        r["name"],
-                "market":      r["market"],
-                "close":       int(r["close"]),
-                "chg_pct":     round(float(r["chg_pct"]), 2),
-                "trade_val":   int(r["trade_val"]),
-                "turnover":    round(float(r["turnover"]), 3),
-                "foreign_net": fn,
-                "inst_net":    it,
-                "signal":      "+".join(signals) if signals else "변동",
-            })
+            featured_list = []
+            for _, r in feat_df.iterrows():
+                signals = []
+                if r["chg_pct"] >= 3.0:
+                    signals.append("급등")
+                elif r["chg_pct"] <= -3.0:
+                    signals.append("급락")
+                if r["turnover"] >= turn_threshold:
+                    signals.append("거래량급증")
+                inv = inv_map.get(r["ticker"], {})
+                fn, it = inv.get("foreign_net"), inv.get("inst_net")
+                if   fn is not None and fn > 0: signals.append("외인매수")
+                elif fn is not None and fn < 0: signals.append("외인매도")
+                if   it is not None and it > 0: signals.append("기관매수")
+                elif it is not None and it < 0: signals.append("기관매도")
+                featured_list.append({
+                    "ticker":      r["ticker"],
+                    "name":        r["name"],
+                    "market":      market_name,
+                    "close":       int(r["close"]),
+                    "chg_pct":     round(float(r["chg_pct"]), 2),
+                    "trade_val":   int(r["trade_val"]),
+                    "turnover":    round(float(r["turnover"]), 3),
+                    "foreign_net": fn,
+                    "inst_net":    it,
+                    "signal":      "+".join(signals) if signals else "변동",
+                })
+            return major_list, featured_list
+
+        major_kospi,    featured_kospi    = _analyze_market(
+            merged[merged["market"] == "KOSPI"],  "KOSPI")
+        major_kosdaq,   featured_kosdaq   = _analyze_market(
+            merged[merged["market"] == "KOSDAQ"], "KOSDAQ")
+
+        # 통합 키 (DB 저장·기존 호환)
+        major    = major_kospi    + major_kosdaq
+        featured = featured_kospi + featured_kosdaq
 
         # ── investor_flow: 전 종목 외인/기관 순매수 (분석용) ─────────
+        # 한 번에 ticker별 OHLCV 조회를 위한 인덱스
+        ohlcv_idx = ohlcv.set_index("ticker")
         investor_flow = []
         for ticker, inv in inv_map.items():
-            row_ohlcv = ohlcv[ohlcv["ticker"] == ticker]
+            row = ohlcv_idx.loc[ticker] if ticker in ohlcv_idx.index else None
+            if row is None:
+                continue
+            # 동일 ticker 중복 인덱스 방지
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
             investor_flow.append({
                 "ticker":      ticker,
-                "name":        name_map.get(ticker, ticker),
-                "market":      row_ohlcv["market"].iloc[0] if not row_ohlcv.empty else None,
-                "close":       int(row_ohlcv["close"].iloc[0]) if not row_ohlcv.empty else None,
-                "chg_pct":     round(float(row_ohlcv["chg_pct"].iloc[0]), 2) if not row_ohlcv.empty else None,
+                "name":        row.get("name") if "name" in row else ticker,
+                "market":      row.get("market"),
+                "close":       int(row["close"]) if pd.notna(row.get("close")) else None,
+                "chg_pct":     round(float(row["chg_pct"]), 2) if pd.notna(row.get("chg_pct")) else None,
                 "foreign_net": inv.get("foreign_net"),
                 "inst_net":    inv.get("inst_net"),
             })
 
-        return {"major": major, "featured": featured, "investor_flow": investor_flow,
-                "breadth": breadth, "market_flow": market_flow}
+        return {
+            # 시장별 분리
+            "major_kospi":        major_kospi,
+            "major_kosdaq":       major_kosdaq,
+            "featured_kospi":     featured_kospi,
+            "featured_kosdaq":    featured_kosdaq,
+            "breadth_kospi":      breadth_kospi,
+            "breadth_kosdaq":     breadth_kosdaq,
+            "market_flow_kospi":  market_flow_kospi,
+            "market_flow_kosdaq": market_flow_kosdaq,
+            # 통합 (DB·기존 호환)
+            "major":         major,
+            "featured":      featured,
+            "investor_flow": investor_flow,
+            "breadth":       breadth,
+            "market_flow":   market_flow,
+        }
 
     except Exception as e:
         print(f"  [collect_stocks ERROR] {e}")
         return {"major": [], "featured": []}
     finally:
         _restore_webio(orig)
+
+
+# ================================================================== #
+#  ASIA OVERSEAS — Nikkei225 / CSI300 / HSI 구성종목 분석 (LSEG)
+#
+#  각 시장에 대해:
+#    - 시총+거래대금 상위 N개 (major)
+#    - 등락률 ±3% 이상 or 거래량 5일평균 대비 1.5배 이상 (featured)
+#    - GICS 섹터별 평균 등락률 + 시총가중 등락률 (sectors)
+# ================================================================== #
+
+ASIA_OVERSEAS_MARKETS = [
+    {"key": "jp", "name": "Nikkei225", "chain": "0#.N225",  "currency": "JPY"},
+    {"key": "cn", "name": "CSI300",    "chain": "0#.CSI300", "currency": "CNY"},
+    {"key": "hk", "name": "HSI",       "chain": "0#.HSI",    "currency": "HKD"},
+]
+
+
+def _fetch_asia_market(chain: str, target_date: str,
+                       market_key: str = "",
+                       n_major: int = 8, n_featured: int = 6,
+                       lookback_days: int = 10) -> dict:
+    """
+    LSEG ChainRIC으로 단일 시장 구성종목 분석 + market_daily 저장.
+
+    Parameters
+    ----------
+    chain        : LSEG Chain RIC (예: 0#.N225)
+    target_date  : 분석 기준일 YYYY-MM-DD
+    market_key   : jp | cn | hk (market_daily category 접두어용)
+    """
+    import lseg.data as ld
+
+    # ── 1. 종목 메타 + 당일 스냅샷 (시총·종가·거래량·섹터) ──────────
+    try:
+        meta = ld.get_data(
+            universe=chain,
+            fields=[
+                "TR.RIC", "TR.CompanyName",
+                "TR.CompanyMarketCap",
+                "TR.PriceClose",
+                "TR.Volume",
+                "TR.GICSSector",
+            ],
+        )
+    except Exception as e:
+        print(f"    [{chain} meta ERROR] {e}")
+        return {}
+    if meta is None or meta.empty:
+        return {}
+
+    meta.columns = [str(c).strip() for c in meta.columns]
+    meta = meta.rename(columns={
+        "Instrument":         "ticker",
+        "RIC":                "ric",
+        "Company Name":       "name",
+        "Company Market Cap": "mktcap",
+        "Price Close":        "close",
+        "Volume":             "volume",
+        "GICS Sector Name":   "sector",
+    })
+    # 유효 행만
+    meta["close"]  = pd.to_numeric(meta["close"],  errors="coerce")
+    meta["volume"] = pd.to_numeric(meta["volume"], errors="coerce")
+    meta["mktcap"] = pd.to_numeric(meta["mktcap"], errors="coerce")
+    meta = meta[meta["close"] > 0].copy()
+    if meta.empty:
+        return {}
+
+    tickers = meta["ticker"].astype(str).tolist()
+
+    # ── 2. lookback OHLCV (등락률·거래량 surge 계산 + market_daily 저장) ─
+    try:
+        hist = ld.get_data(
+            universe=tickers,
+            fields=[
+                "TR.PriceOpen", "TR.PriceHigh", "TR.PriceLow",
+                "TR.PriceClose", "TR.Volume", "TR.PriceClose.date",
+            ],
+            parameters={"SDate": f"-{lookback_days}D", "EDate": "0D", "Frq": "D"},
+        )
+    except Exception as e:
+        print(f"    [{chain} hist ERROR] {e}")
+        hist = pd.DataFrame()
+
+    chg_map: dict[str, float] = {}
+    surge_map: dict[str, float] = {}
+    md_records: list[dict] = []
+    if hist is not None and not hist.empty:
+        hist.columns = [str(c).strip() for c in hist.columns]
+        hist = hist.rename(columns={
+            "Instrument":  "ticker",
+            "Price Open":  "open",
+            "Price High":  "high",
+            "Price Low":   "low",
+            "Price Close": "close",
+            "Volume":      "volume",
+            "Date":        "date",
+        })
+        for col in ("open", "high", "low", "close", "volume"):
+            if col in hist.columns:
+                hist[col] = pd.to_numeric(hist[col], errors="coerce")
+        hist = hist.dropna(subset=["close", "date"])
+        hist = hist.sort_values(["ticker", "date"])
+
+        # market_daily 저장용 레코드 (전 종목 × 전 거래일)
+        for _, row in hist.iterrows():
+            close = row.get("close")
+            if pd.isna(close) or close <= 0:
+                continue
+            date_str = str(row["date"])[:10]
+            md_records.append({
+                "date":     date_str,
+                "session":  "asia",
+                "category": f"{market_key}_stock" if market_key else "overseas_stock",
+                "name":     str(row["ticker"]),
+                "close":    float(close),
+                "open":     float(row["open"])   if pd.notna(row.get("open"))   else None,
+                "high":     float(row["high"])   if pd.notna(row.get("high"))   else None,
+                "low":      float(row["low"])    if pd.notna(row.get("low"))    else None,
+                "volume":   float(row["volume"]) if pd.notna(row.get("volume")) else None,
+            })
+
+        # 분석용 등락률 / surge_ratio
+        for t, g in hist.groupby("ticker"):
+            g = g[g["close"] > 0]
+            if len(g) >= 2:
+                prev_close = float(g["close"].iloc[-2])
+                cur_close  = float(g["close"].iloc[-1])
+                if prev_close > 0:
+                    chg_map[str(t)] = round((cur_close - prev_close) / prev_close * 100, 2)
+            vols = g["volume"].dropna()
+            if len(vols) >= 4:
+                today_vol = float(vols.iloc[-1])
+                past_avg  = float(vols.iloc[:-1].tail(5).mean())
+                if past_avg > 0:
+                    surge_map[str(t)] = round(today_vol / past_avg, 2)
+
+    # market_daily 저장
+    if md_records:
+        try:
+            from db.db_manager import DBManager as _DBM
+            n_saved = _DBM().upsert_market_daily(md_records)
+            print(f"    [{market_key or chain} market_daily] 저장 {n_saved}건 "
+                  f"({len(set(r['name'] for r in md_records))}개 종목 × "
+                  f"{len(set(r['date'] for r in md_records))}일)")
+        except Exception as _e:
+            print(f"    [{market_key or chain} market_daily ERROR] {_e}")
+
+    # 메타에 lookback 결과 병합
+    meta["chg_pct"]     = meta["ticker"].astype(str).map(chg_map)
+    meta["surge_ratio"] = meta["ticker"].astype(str).map(surge_map)
+    meta["trade_val"]   = meta["close"] * meta["volume"]
+
+    # 등락률을 못 받은 종목은 분석 불가 → 제외
+    valid = meta.dropna(subset=["chg_pct"]).copy()
+    if valid.empty:
+        return {}
+
+    # ── 3. 시장 폭 ─────────────────────────────────────────────────
+    up   = int((valid["chg_pct"] > 0).sum())
+    down = int((valid["chg_pct"] < 0).sum())
+    flat = int((valid["chg_pct"] == 0).sum())
+    tot  = up + down + flat
+    breadth = {
+        "up": up, "down": down, "flat": flat, "total": tot,
+        "up_pct": round(up / tot * 100, 1) if tot > 0 else None,
+        "adr":    round(up / down, 2)      if down > 0 else None,
+    }
+
+    # ── 4. major: 시총순위 + 거래대금순위 합산 ─────────────────────
+    valid["rank_cap"]    = valid["mktcap"].rank(ascending=False)
+    valid["rank_trade"]  = valid["trade_val"].rank(ascending=False)
+    valid["major_score"] = valid["rank_cap"] + valid["rank_trade"]
+    major_df = valid.nsmallest(n_major, "major_score")
+
+    def _row_to_major(r) -> dict:
+        return {
+            "ticker":     str(r["ticker"]),
+            "name":       str(r.get("name") or r["ticker"])[:40],
+            "sector":     str(r.get("sector") or "-"),
+            "close":      round(float(r["close"]), 2),
+            "chg_pct":    float(r["chg_pct"]),
+            "mktcap_b":   round(float(r["mktcap"]) / 1e9, 2) if pd.notna(r.get("mktcap")) else None,
+            "trade_val_b": round(float(r["trade_val"]) / 1e9, 2) if pd.notna(r.get("trade_val")) else None,
+        }
+
+    major_list = [_row_to_major(r) for _, r in major_df.iterrows()]
+
+    # ── 5. featured: |등락률|≥3% or 거래량 surge≥1.5 ───────────────
+    valid["abs_chg"] = valid["chg_pct"].abs()
+    feat_mask = (valid["abs_chg"] >= 3.0) | (valid["surge_ratio"].fillna(0) >= 1.5)
+    cand = valid[feat_mask].copy()
+    # 스코어: |등락률|순위 + surge_ratio순위 (낮을수록 우수)
+    cand["rank_chg"]   = cand["abs_chg"].rank(ascending=False)
+    cand["rank_surge"] = cand["surge_ratio"].fillna(0).rank(ascending=False)
+    cand["feat_score"] = cand["rank_chg"] + cand["rank_surge"]
+    feat_df = cand.nsmallest(n_featured, "feat_score")
+
+    def _row_to_featured(r) -> dict:
+        signals = []
+        if r["chg_pct"] >=  3.0: signals.append("급등")
+        elif r["chg_pct"] <= -3.0: signals.append("급락")
+        sr = r.get("surge_ratio")
+        if pd.notna(sr) and sr >= 1.5:
+            signals.append(f"거래량{sr:.1f}x")
+        return {
+            "ticker":      str(r["ticker"]),
+            "name":        str(r.get("name") or r["ticker"])[:40],
+            "sector":      str(r.get("sector") or "-"),
+            "close":       round(float(r["close"]), 2),
+            "chg_pct":     float(r["chg_pct"]),
+            "surge_ratio": float(sr) if pd.notna(sr) else None,
+            "trade_val_b": round(float(r["trade_val"]) / 1e9, 2) if pd.notna(r.get("trade_val")) else None,
+            "signal":      "+".join(signals) if signals else "변동",
+        }
+
+    featured_list = [_row_to_featured(r) for _, r in feat_df.iterrows()]
+
+    # ── 6. 섹터 분석: 단순평균 + 시총가중평균 ──────────────────────
+    sectors = []
+    sec_g = valid[valid["sector"].notna() & (valid["sector"] != "-")].copy()
+    if not sec_g.empty:
+        sec_g["cap"] = sec_g["mktcap"].fillna(0)
+        for sec_name, g in sec_g.groupby("sector"):
+            total_cap = float(g["cap"].sum())
+            wmean = float((g["chg_pct"] * g["cap"]).sum() / total_cap) if total_cap > 0 else None
+            sectors.append({
+                "sector":    str(sec_name),
+                "n":         int(len(g)),
+                "chg_avg":   round(float(g["chg_pct"].mean()), 2),
+                "chg_wmean": round(wmean, 2) if wmean is not None else None,
+                "mktcap_b":  round(total_cap / 1e9, 1),
+            })
+        # 시총가중 등락률 절대값 큰 순
+        sectors.sort(key=lambda s: abs(s.get("chg_wmean") or s["chg_avg"]), reverse=True)
+
+    return {
+        "major":    major_list,
+        "featured": featured_list,
+        "sectors":  sectors,
+        "breadth":  breadth,
+    }
+
+
+def fetch_asia_overseas_stocks(target_date: str,
+                               n_major: int = 8,
+                               n_featured: int = 6) -> dict:
+    """일본·중국·홍콩 시장의 시총+거래대금 상위, 특징주, 섹터 분석.
+
+    Returns
+    -------
+    {
+      "jp": {"name": "Nikkei225", "major": [...], "featured": [...], "sectors": [...], "breadth": {...}},
+      "cn": {...},
+      "hk": {...},
+    }
+    """
+    result: dict = {}
+    for mkt in ASIA_OVERSEAS_MARKETS:
+        print(f"  [asia overseas] {mkt['name']} ({mkt['chain']}) 분석 중...")
+        try:
+            data = _fetch_asia_market(
+                mkt["chain"], target_date,
+                market_key=mkt["key"],
+                n_major=n_major, n_featured=n_featured,
+            )
+            if data:
+                data["name"]     = mkt["name"]
+                data["currency"] = mkt["currency"]
+                result[mkt["key"]] = data
+                print(f"    {mkt['name']}: major {len(data['major'])} / "
+                      f"featured {len(data['featured'])} / sectors {len(data['sectors'])}  "
+                      f"폭 {data['breadth'].get('up_pct')}%")
+            else:
+                print(f"    {mkt['name']}: 데이터 없음")
+        except Exception as e:
+            print(f"    [{mkt['name']} ERROR] {e}")
+    return result
 
 
 # ================================================================== #
@@ -370,13 +712,16 @@ def fetch_europe_stocks(target_date: str) -> dict:
     sectors = []
     for ric, meta_name in sector_names.items():
         v = sector_prices.get(ric, {})
-        if v.get("close") is not None:
-            sectors.append({
-                "ric":     ric,
-                "name":    meta_name,
-                "close":   round(float(v["close"]), 2),
-                "chg_pct": round(float(v["chg_pct"]), 2) if v.get("chg_pct") is not None else None,
-            })
+        close_v = v.get("close")
+        if close_v is None or pd.isna(close_v):
+            continue
+        chg_v = v.get("chg_pct")
+        sectors.append({
+            "ric":     ric,
+            "name":    meta_name,
+            "close":   round(float(close_v), 2),
+            "chg_pct": round(float(chg_v), 2) if (chg_v is not None and not pd.isna(chg_v)) else None,
+        })
     sectors.sort(key=lambda x: (x["chg_pct"] or 0), reverse=True)
 
     # ── 2. DAX40·FTSE30·CAC40 구성종목 (yfinance) ───────────────────
@@ -391,6 +736,16 @@ def fetch_europe_stocks(target_date: str) -> dict:
 
     # 종목별 지표 계산
     stats: dict[str, dict] = {}
+    # 통화 매핑: yfinance suffix → 현지통화
+    def _ccy_of(t: str) -> str:
+        if t.endswith(".L"):  return "GBp"   # London은 pence 단위
+        if t.endswith(".DE"): return "EUR"
+        if t.endswith(".PA"): return "EUR"
+        if t.endswith(".AS"): return "EUR"
+        if t.endswith(".MI"): return "EUR"
+        if t.endswith(".SW"): return "CHF"
+        return "EUR"
+
     for ticker, df in stock_data.items():
         if len(df) < 2:
             continue
@@ -399,13 +754,49 @@ def fetch_europe_stocks(target_date: str) -> dict:
         if close <= 0 or prev <= 0:
             continue
         vol = float(df["Volume"].iloc[-1]) if "Volume" in df and pd.notna(df["Volume"].iloc[-1]) else None
+
+        # 거래대금 (현지통화 millions) + surge_ratio (오늘 / 과거 5일 평균)
+        trade_val_local_m = None
+        surge_ratio = None
+        if vol and vol > 0:
+            trade_val_local_m = (close * vol) / 1e6
+            hist_dvol = (df["Close"] * df["Volume"]).iloc[:-1].dropna()
+            if len(hist_dvol) >= 2:
+                avg = float(hist_dvol.tail(5).mean())
+                if avg > 0:
+                    surge_ratio = round(close * vol / avg, 2)
+
         stats[ticker] = {
-            "name":    yf_names.get(ticker, ticker),
-            "index":   yf_index.get(ticker, ""),
-            "close":   round(close, 2),
-            "chg_pct": round((close - prev) / abs(prev) * 100, 2),
-            "volume":  int(vol) if vol else None,
+            "name":         yf_names.get(ticker, ticker),
+            "index":        yf_index.get(ticker, ""),
+            "ccy":          _ccy_of(ticker),
+            "close":        round(close, 2),
+            "chg_pct":      round((close - prev) / abs(prev) * 100, 2),
+            "volume":       int(vol) if vol else None,
+            "trade_val_lm": round(trade_val_local_m, 2) if trade_val_local_m else None,
+            "surge_ratio":  surge_ratio,
         }
+
+    # ── 시총 조회 (LSEG TR.CompanyMarketCap, USD billion) ───────────
+    mktcap_b_map: dict[str, float] = {}
+    if stats:
+        try:
+            mc_part = ld.get_data(
+                universe=list(stats.keys()),
+                fields=["TR.CompanyMarketCap"],
+            )
+            if mc_part is not None and not mc_part.empty:
+                for _, row in mc_part.iterrows():
+                    tk = str(row.get("Instrument", "")).strip()
+                    cap = row.get("Company Market Cap")
+                    if tk and pd.notna(cap) and cap:
+                        # LSEG는 현지통화 단위 — USD 환산은 생략하고 십억 단위로
+                        mktcap_b_map[tk] = round(float(cap) / 1e9, 2)
+        except Exception as _e:
+            print(f"    [europe mktcap LSEG ERROR] {_e}")
+
+    for tk, s in stats.items():
+        s["mktcap_b"] = mktcap_b_map.get(tk)
 
     # 시장 폭 계산
     if stats:
@@ -422,12 +813,62 @@ def fetch_europe_stocks(target_date: str) -> dict:
     else:
         eu_breadth = {}
 
-    # |등락률| 상위 15개 → top_stocks
+    # |등락률| 상위 15개 → top_stocks (호환성 유지)
     top_stocks = [
         {"ticker": t, "name": s["name"], "index": s["index"],
          "close": s["close"], "chg_pct": s["chg_pct"]}
         for t, s in sorted(stats.items(), key=lambda x: abs(x[1]["chg_pct"]), reverse=True)[:15]
     ]
+
+    # 시총 상위 10
+    mktcap_top = [
+        {"ticker": t, "name": s["name"], "index": s["index"], "ccy": s["ccy"],
+         "close": s["close"], "chg_pct": s["chg_pct"],
+         "mktcap_b": s.get("mktcap_b"),
+         "dollar_vol_b": (s.get("trade_val_lm") / 1000) if s.get("trade_val_lm") else None,
+         "signal": "시총상위"}
+        for t, s in sorted(
+            ((k, v) for k, v in stats.items() if v.get("mktcap_b") is not None),
+            key=lambda x: x[1]["mktcap_b"], reverse=True
+        )[:10]
+    ]
+
+    # 거래대금 상위 10
+    tradeval_top = [
+        {"ticker": t, "name": s["name"], "index": s["index"], "ccy": s["ccy"],
+         "close": s["close"], "chg_pct": s["chg_pct"],
+         "mktcap_b": s.get("mktcap_b"),
+         "dollar_vol_b": (s.get("trade_val_lm") / 1000) if s.get("trade_val_lm") else None,
+         "signal": "거래대금상위"}
+        for t, s in sorted(
+            ((k, v) for k, v in stats.items() if v.get("trade_val_lm") is not None),
+            key=lambda x: x[1]["trade_val_lm"], reverse=True
+        )[:10]
+    ]
+
+    # 거래대금 급증 + 급등락 (surge_ratio ≥ 1.5 & |chg| ≥ 2%)
+    surge_cands = [
+        (t, s) for t, s in stats.items()
+        if s.get("surge_ratio") and s["surge_ratio"] >= 1.5
+        and abs(s["chg_pct"]) >= 2.0
+    ]
+    surge_cands.sort(key=lambda x: x[1]["surge_ratio"], reverse=True)
+    turnover_surge = []
+    for t, s in surge_cands[:10]:
+        signals = []
+        if s["chg_pct"] >= 3:    signals.append("급등")
+        elif s["chg_pct"] <= -3: signals.append("급락")
+        signals.append(f"거래대금{s['surge_ratio']:.1f}x")
+        turnover_surge.append({
+            "ticker": t, "name": s["name"], "index": s["index"], "ccy": s["ccy"],
+            "close": s["close"], "chg_pct": s["chg_pct"],
+            "surge_ratio": s["surge_ratio"],
+            "dollar_vol_b": (s.get("trade_val_lm") / 1000) if s.get("trade_val_lm") else None,
+            "signal": "+".join(signals),
+        })
+
+    print(f"    [europe screening] 시총상위 {len(mktcap_top)} | 거래대금상위 {len(tradeval_top)} | "
+          f"급증 {len(turnover_surge)}")
 
     # ── 3. market_daily 저장 ────────────────────────────────────────
     try:
@@ -435,12 +876,16 @@ def fetch_europe_stocks(target_date: str) -> dict:
         md_records = []
         # 섹터 지수 (LSEG)
         for ric, v in sector_prices.items():
-            if v.get("close") is not None:
-                md_records.append({
-                    "date": target_date, "session": "europe", "category": "sector",
-                    "name": ric, "close": v.get("close"), "open": None,
-                    "high": None, "low": None, "volume": v.get("volume"),
-                })
+            close_v = v.get("close")
+            if close_v is None or pd.isna(close_v):
+                continue
+            vol_v = v.get("volume")
+            md_records.append({
+                "date": target_date, "session": "europe", "category": "sector",
+                "name": ric, "close": float(close_v), "open": None,
+                "high": None, "low": None,
+                "volume": float(vol_v) if (vol_v is not None and not pd.isna(vol_v)) else None,
+            })
         # 구성종목 전체 × 전일치 OHLCV (yfinance)
         for ticker, df in stock_data.items():
             for dt_idx, row in df.iterrows():
@@ -460,7 +905,9 @@ def fetch_europe_stocks(target_date: str) -> dict:
     except Exception as _e:
         print(f"  [europe stocks market_daily ERROR] {_e}")
 
-    return {"sectors": sectors, "top_stocks": top_stocks, "breadth": eu_breadth}
+    return {"sectors": sectors, "top_stocks": top_stocks, "breadth": eu_breadth,
+            "mktcap_top": mktcap_top, "tradeval_top": tradeval_top,
+            "turnover_surge": turnover_surge}
 
 
 # ================================================================== #

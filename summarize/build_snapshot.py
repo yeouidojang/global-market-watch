@@ -116,17 +116,34 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
         else:
             result_macro[name] = entry
 
-    # 경제지표 향후 3일
-    econ_df = db.get_upcoming_events(today, days=3)
-    econ_upcoming = econ_df.to_dict("records") if not econ_df.empty else []
+    # 경제지표 / 어닝 캘린더 — US 세션 전용 (이번주 월요일 ~ 다음주 일요일)
+    econ_upcoming: list[dict] = []
+    earnings_upcoming: list[dict] = []
+    if session == "us":
+        today_dt = date.fromisoformat(today)
+        week_start = today_dt - timedelta(days=today_dt.weekday())   # 이번주 월요일
+        next_sunday = week_start + timedelta(days=13)                # 다음주 일요일
+        span_days = (next_sunday - week_start).days                  # 13
+
+        econ_df = db.get_upcoming_events(week_start.isoformat(), days=span_days)
+        if not econ_df.empty:
+            econ_upcoming = econ_df.to_dict("records")
+
+        try:
+            e_df = db.get_upcoming_earnings(week_start.isoformat(), days=span_days)
+            if not e_df.empty:
+                earnings_upcoming = e_df.to_dict("records")
+        except Exception:
+            earnings_upcoming = []
 
     return {
-        "date":          today,
-        "session":       session,
-        "indices":       result_indices,
-        "macro":         result_macro,
-        "econ_upcoming": econ_upcoming,
-        "stocks":        stocks_data or {},
+        "date":              today,
+        "session":           session,
+        "indices":           result_indices,
+        "macro":             result_macro,
+        "econ_upcoming":     econ_upcoming,
+        "earnings_upcoming": earnings_upcoming,
+        "stocks":            stocks_data or {},
     }
 
 
@@ -174,9 +191,9 @@ def format_snapshot_text(snapshot: dict) -> str:
             it  = f"기관 {s['inst_net']//100_000_000:+,}억"    if s.get("inst_net")    is not None else "기관 -"
             lines.append(f"  {s['name']:12s}  {chg:>7s}  {fn}  {it}  [{s['signal']}]")
 
-    # 경제지표
+    # 경제지표 (US 전용 — 이번주 + 다음주, 발표 완료 항목 포함)
     if snapshot["econ_upcoming"]:
-        lines.append("\n[향후 경제지표 발표]")
+        lines.append("\n[주요 경제지표 — 이번주·다음주 (발표 완료 항목 포함)]")
         imp_icon = {"high": "★★★", "medium": "★★☆", "low": "★☆☆"}
         for ev in snapshot["econ_upcoming"]:
             imp  = imp_icon.get(ev.get("importance", "medium"), "★★☆")
@@ -185,10 +202,37 @@ def format_snapshot_text(snapshot: dict) -> str:
             fc   = f"  예상 {ev['forecast']}" if ev.get("forecast") is not None else ""
             prev = f"  이전 {ev['previous']}" if ev.get("previous") is not None else ""
             act  = f"  실제 {ev['actual']}" if ev.get("actual") is not None else ""
+            status = "[발표됨] " if ev.get("actual") is not None else ""
             lines.append(
-                f"  {ev['event_date']}{time_str}  {ev['country']:3s}  {imp}  "
+                f"  {ev['event_date']}{time_str}  {ev['country']:3s}  {imp}  {status}"
                 f"{ev['indicator']:20s}{period_str}{fc}{prev}{act}"
             )
+
+    # 어닝 캘린더 (US 전용 — 이번주 + 다음주, 발표 완료 종목 포함)
+    earnings = snapshot.get("earnings_upcoming", [])
+    if earnings:
+        lines.append("\n[SPX 기업실적 — 이번주·다음주 (발표 완료 종목 포함, Finnhub)]")
+        hour_label = {"bmo": "장전", "amc": "장후", "dmh": "장중"}
+        by_date: dict[str, list[dict]] = {}
+        for ev in earnings:
+            by_date.setdefault(ev["event_date"], []).append(ev)
+        for d in sorted(by_date.keys()):
+            day_rows = by_date[d]
+            lines.append(f"  {d}  ({len(day_rows)}개)")
+            for ev in day_rows[:8]:
+                hr = hour_label.get((ev.get("hour") or "").lower(), "-")
+                est = ev.get("eps_estimate")
+                act = ev.get("eps_actual")
+                est_str = f"est {est:+.2f}" if est is not None else "est -"
+                if act is not None:
+                    surp = ev.get("surprise_pct")
+                    act_str = f" act {act:+.2f}" + (f" ({surp:+.1f}%)" if surp is not None else "")
+                else:
+                    act_str = ""
+                yq = f"{ev.get('year') or '-'}Q{ev.get('quarter') or '-'}"
+                lines.append(f"    {ev['symbol']:6s}  {hr:4s}  {yq}  {est_str}{act_str}")
+            if len(day_rows) > 8:
+                lines.append(f"    ... +{len(day_rows)-8}건")
 
     return "\n".join(lines)
 

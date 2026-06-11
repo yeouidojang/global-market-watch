@@ -6,3 +6,4 @@ pyyaml>=6.0
 yfinance>=0.2.50
 requests>=2.31.0
 python-dotenv>=1.0.0
+finnhub-python>=2.4.0
