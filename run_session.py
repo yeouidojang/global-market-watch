@@ -195,11 +195,12 @@ def run_session(session: str, target_date: str,
     if latest:
         send_briefing(briefing_id=latest["id"], session=session, date=target_date)
 
-    try:
-        from summarize.notify_clickup import send_briefing_to_docs
-        send_briefing_to_docs(content=content, session=session, date=target_date)
-    except Exception as _cu_e:
-        print(f"  [ClickUp 발송 ERROR] {_cu_e}")
+    if session != "europe":
+        try:
+            from summarize.notify_clickup import send_briefing_to_docs
+            send_briefing_to_docs(content=content, session=session, date=target_date)
+        except Exception as _cu_e:
+            print(f"  [ClickUp 발송 ERROR] {_cu_e}")
 
     print(f"\n✅ 완료: {session.upper()} 세션 파이프라인")
 

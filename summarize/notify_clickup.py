@@ -34,9 +34,8 @@ WORKSPACE_ID  = os.getenv("CLICKUP_WORKSPACE_ID", "")
 DOC_ID        = os.getenv("CLICKUP_BRIEFING_DOC_ID", "")
 
 SESSION_LABEL = {
-    "asia":   "ASIA 시황",
-    "europe": "EUROPE 시황",
-    "us":     "US/Global 시황",
+    "asia": "ASIA 시황",
+    "us":   "Global 시황",
 }
 
 
