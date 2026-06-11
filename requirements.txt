@@ -1,0 +1,8 @@
+# global_market_watch 의존성
+anthropic>=0.40.0
+apscheduler>=3.10.0
+pandas>=2.0.0
+pyyaml>=6.0
+yfinance>=0.2.50
+requests>=2.31.0
+python-dotenv>=1.0.0

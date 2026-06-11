@@ -1,0 +1,23 @@
+# 스케줄 트리거 설정 (KST 기준)
+# APScheduler cron 표현식 사용
+
+triggers:
+  asia_close:
+    hour: 15
+    minute: 40
+    label: "아시아 마감"
+    session: asia
+
+  europe_close:
+    hour: 1
+    minute: 40
+    label: "유럽 마감"
+    session: europe
+
+  us_close:
+    hour: 6
+    minute: 10
+    label: "미국 마감 + 글로벌 브리핑"
+    session: us
+
+timezone: "Asia/Seoul"

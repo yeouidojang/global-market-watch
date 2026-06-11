@@ -1,0 +1,52 @@
+# 매크로 지표: FX, 금리, 원자재, 변동성
+# source: lseg | yfinance | fred
+
+fx:
+  - ric: "KRW="
+    name: USD_KRW
+    source: lseg
+  - ric: "JPY="
+    name: USD_JPY
+    source: lseg
+  - ric: "EUR="
+    name: EUR_USD
+    source: lseg
+  - ric: "CNY="
+    name: USD_CNY
+    source: lseg
+
+rates:
+  - ric: "US10YT=RR"
+    name: US_10Y
+    source: lseg
+  - ric: "US2YT=RR"
+    name: US_2Y
+    source: lseg
+  - ric: "KR3YT=RR"
+    name: KR_3Y
+    source: lseg
+  - ric: "JP10YT=RR"
+    name: JP_10Y
+    source: lseg
+
+commodities:
+  - ric: "LCOc1"
+    name: Brent
+    source: lseg
+  - ric: "CLc1"
+    name: WTI
+    source: lseg
+  - ric: "XAU="
+    name: Gold
+    source: lseg
+  - ric: "XCUPM="
+    name: Copper
+    source: lseg
+
+volatility:
+  - ticker: "^VIX"
+    name: VIX
+    source: yfinance
+  - ticker: "^MOVE"
+    name: MOVE
+    source: yfinance

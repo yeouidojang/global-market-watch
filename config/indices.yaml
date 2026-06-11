@@ -1,0 +1,168 @@
+# 지역별 추적 지수 및 RIC 목록
+# LSEG RIC 기준
+
+asia:
+  korea:
+    - name: KOSPI
+      source: pykrx
+      krx_ticker: "1001"
+    - name: KOSDAQ
+      source: pykrx
+      krx_ticker: "2001"
+  japan:
+    - ticker: "^N225"
+      name: Nikkei225
+      source: yfinance
+    - ric: ".TOPX"
+      name: TOPIX
+      source: lseg
+  china:
+    - ticker: "000300.SS"
+      name: CSI300
+      source: yfinance
+    - ticker: "^HSI"
+      name: HangSeng
+      source: yfinance
+    - ticker: "^HSCE"
+      name: HSCEI
+      source: yfinance
+
+europe:
+  indices:
+    - ticker: "^GDAXI"
+      name: DAX
+      source: yfinance
+    - ticker: "^FTSE"
+      name: FTSE100
+      source: yfinance
+    - ticker: "^FCHI"
+      name: CAC40
+      source: yfinance
+    - ticker: "^STOXX50E"
+      name: EuroStoxx50
+      source: yfinance
+  # STOXX Europe 600 섹터 지수 (LSEG RIC)
+  sectors:
+    - ric: ".SXKP"
+      name: EU_Tech
+    - ric: ".SXBP"
+      name: EU_Banks
+    - ric: ".SXAP"
+      name: EU_Auto
+    - ric: ".SXEP"
+      name: EU_Energy
+    - ric: ".SXHP"
+      name: EU_Healthcare
+    - ric: ".SXIP"
+      name: EU_Industrial
+    - ric: ".SXFP"
+      name: EU_FinServices
+    - ric: ".SXUP"
+      name: EU_Utilities
+    - ric: ".SX3P"
+      name: EU_FoodBev
+    - ric: ".SX6P"
+      name: EU_Telecom
+  # DAX 주요 구성종목 (LSEG RIC)
+  top_stocks:
+    - ric: "SAP.DE"
+      name: SAP
+    - ric: "SIE.DE"
+      name: Siemens
+    - ric: "ALV.DE"
+      name: Allianz
+    - ric: "DTE.DE"
+      name: DeutscheTelekom
+    - ric: "MRK.DE"
+      name: Merck_DE
+    - ric: "BMW.DE"
+      name: BMW
+    - ric: "VOW3.DE"
+      name: Volkswagen
+    - ric: "BAS.DE"
+      name: BASF
+    - ric: "BAYN.DE"
+      name: Bayer
+    - ric: "DBK.DE"
+      name: DeutscheBank
+    - ric: "AZN.L"
+      name: AstraZeneca
+    - ric: "HSBA.L"
+      name: HSBC
+    - ric: "SHEL.L"
+      name: Shell
+    - ric: "BP.L"
+      name: BP
+    - ric: "LVMH.PA"
+      name: LVMH
+
+us:
+  indices:
+    - ticker: "^GSPC"
+      name: SP500
+      source: yfinance
+    - ticker: "^NDX"
+      name: Nasdaq100
+      source: yfinance
+    - ticker: "^DJI"
+      name: DowJones
+      source: yfinance
+    - ticker: "^RUT"
+      name: Russell2000
+      source: yfinance
+  # SPX 섹터 ETF (yfinance ticker)
+  sector_etfs:
+    - ticker: "XLK"
+      name: US_Tech
+    - ticker: "XLF"
+      name: US_Finance
+    - ticker: "XLE"
+      name: US_Energy
+    - ticker: "XLV"
+      name: US_Healthcare
+    - ticker: "XLY"
+      name: US_ConsDis
+    - ticker: "XLP"
+      name: US_ConsStap
+    - ticker: "XLI"
+      name: US_Industrial
+    - ticker: "XLB"
+      name: US_Materials
+    - ticker: "XLU"
+      name: US_Utilities
+    - ticker: "XLRE"
+      name: US_RealEstate
+    - ticker: "XLC"
+      name: US_Comm
+  # SPX 시총 상위 대형주 (yfinance)
+  top_stocks:
+    - ticker: "AAPL"
+      name: Apple
+    - ticker: "MSFT"
+      name: Microsoft
+    - ticker: "NVDA"
+      name: Nvidia
+    - ticker: "GOOGL"
+      name: Alphabet
+    - ticker: "AMZN"
+      name: Amazon
+    - ticker: "META"
+      name: Meta
+    - ticker: "TSLA"
+      name: Tesla
+    - ticker: "BRK-B"
+      name: Berkshire
+    - ticker: "JPM"
+      name: JPMorgan
+    - ticker: "LLY"
+      name: EliLilly
+    - ticker: "V"
+      name: Visa
+    - ticker: "UNH"
+      name: UnitedHealth
+    - ticker: "XOM"
+      name: Exxon
+    - ticker: "AVGO"
+      name: Broadcom
+    - ticker: "MA"
+      name: Mastercard
