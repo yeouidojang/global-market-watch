@@ -189,11 +189,17 @@ def run_session(session: str, target_date: str,
         print(f"\n[4/4] Slack 발송 (skip: --no-notify)")
         return
 
-    print(f"\n[4/4] Slack 발송")
+    print(f"\n[4/4] Slack + ClickUp 발송")
     from summarize.notify_slack import send_briefing
     latest = db.get_latest_briefing(session)
     if latest:
         send_briefing(briefing_id=latest["id"], session=session, date=target_date)
+
+    try:
+        from summarize.notify_clickup import send_briefing_to_docs
+        send_briefing_to_docs(content=content, session=session, date=target_date)
+    except Exception as _cu_e:
+        print(f"  [ClickUp 발송 ERROR] {_cu_e}")
 
     print(f"\n✅ 완료: {session.upper()} 세션 파이프라인")
 
@@ -306,11 +312,17 @@ def run_global_pipeline(target_date: str,
         print(f"\n✅ 완료: EUROPE+US 통합 파이프라인 (Slack 미발송)")
         return
 
-    print(f"\n[5/5] Slack 발송 (US 통합 브리핑 1건)")
+    print(f"\n[5/5] Slack + ClickUp 발송 (US 통합 브리핑 1건)")
     from summarize.notify_slack import send_briefing
     latest = db.get_latest_briefing("us")
     if latest:
         send_briefing(briefing_id=latest["id"], session="us", date=target_date)
+
+    try:
+        from summarize.notify_clickup import send_briefing_to_docs
+        send_briefing_to_docs(content=us_content, session="us", date=target_date)
+    except Exception as _cu_e:
+        print(f"  [ClickUp 발송 ERROR] {_cu_e}")
 
     print(f"\n✅ 완료: EUROPE+US 통합 파이프라인")
 
