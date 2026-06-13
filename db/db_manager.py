@@ -363,34 +363,29 @@ class DBManager:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _stocks_data_to_records(date: str, session: str, stocks_data: dict) -> list[dict]:
-        """stocks_data dict → stocks_daily 삽입용 레코드 리스트.
-
-        주의: upsert_stocks_daily()에서 누락 키를 None으로 정규화하므로
-        각 카테고리에서는 해당 카테고리에 의미 있는 필드만 채우면 된다.
-        """
+        """stocks_data dict → stocks_daily 삽입용 레코드 리스트."""
         records = []
 
-        # ── Asia ────────────────────────────────────────────────────────
-        for s in stocks_data.get("major", []):
-            records.append({
-                "date": date, "session": session, "category": "major",
-                "ticker": s.get("ticker", ""), "name": s.get("name"),
-                "market": s.get("market"), "close": s.get("close"),
-                "chg_pct": s.get("chg_pct"), "trade_val": s.get("trade_val"),
-                "mktcap": s.get("mktcap"),
-            })
-        for s in stocks_data.get("featured", []):
-            records.append({
-                "date": date, "session": session, "category": "featured",
-                "ticker": s.get("ticker", ""), "name": s.get("name"),
-                "market": s.get("market"), "close": s.get("close"),
-                "chg_pct": s.get("chg_pct"), "trade_val": s.get("trade_val"),
-                "turnover": s.get("turnover"),
-                "foreign_net": s.get("foreign_net"), "inst_net": s.get("inst_net"),
-                "signal": s.get("signal"),
-            })
+        # ── Asia Korea — major / featured ───────────────────────────────
+        for cat in ("major", "featured",
+                    "major_kospi", "major_kosdaq",
+                    "featured_kospi", "featured_kosdaq"):
+            for s in stocks_data.get(cat, []):
+                records.append({
+                    "date": date, "session": session, "category": cat,
+                    "ticker": s.get("ticker", ""), "name": s.get("name"),
+                    "market": s.get("market"), "close": s.get("close"),
+                    "chg_pct": s.get("chg_pct"),
+                    "trade_val": s.get("trade_val"),
+                    "mktcap": s.get("mktcap"),
+                    "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
+                    "turnover": s.get("turnover"),
+                    "foreign_net": s.get("foreign_net"),
+                    "inst_net": s.get("inst_net"),
+                    "signal": s.get("signal"),
+                })
 
-        # ── Asia investor_flow (전 종목 외인/기관 순매수) ────────────────
+        # ── Asia investor_flow ──────────────────────────────────────────
         for s in stocks_data.get("investor_flow", []):
             records.append({
                 "date": date, "session": session, "category": "investor_flow",
@@ -401,60 +396,75 @@ class DBManager:
             })
 
         # ── Europe ──────────────────────────────────────────────────────
-        for s in stocks_data.get("sectors", []):
-            if session == "europe":
+        if session == "europe":
+            # 섹터 지수
+            for s in stocks_data.get("sectors", []):
                 records.append({
                     "date": date, "session": session, "category": "sectors",
                     "ticker": s.get("ric", s.get("ticker", "")), "name": s.get("name"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
                 })
-        for s in stocks_data.get("top_stocks", []):
-            records.append({
-                "date": date, "session": session, "category": "top_stocks",
-                "ticker": s.get("ric", s.get("ticker", "")), "name": s.get("name"),
-                "close": s.get("close"), "chg_pct": s.get("chg_pct"),
-                "volume": s.get("volume"),
-            })
+            # 종목 스크리닝 (market = index 이름: DAX/FTSE/CAC)
+            for cat in ("mktcap_top", "tradeval_top", "turnover_surge"):
+                for s in stocks_data.get(cat, []):
+                    records.append({
+                        "date": date, "session": session, "category": cat,
+                        "ticker": s.get("ticker", ""), "name": s.get("name"),
+                        "market": s.get("index"),           # DAX/FTSE/CAC → market 컬럼
+                        "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                        "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
+                        "dollar_vol_b": s.get("dollar_vol_b"),
+                        "mktcap_b": s.get("mktcap_b"),
+                        "surge_ratio": s.get("surge_ratio"),
+                        "signal": s.get("signal"),
+                    })
 
         # ── US ──────────────────────────────────────────────────────────
-        for s in stocks_data.get("sectors", []):
-            if session == "us":
+        if session == "us":
+            for s in stocks_data.get("sectors", []):
                 records.append({
                     "date": date, "session": session, "category": "sectors",
                     "ticker": s.get("ticker", ""), "name": s.get("name"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
                 })
-        for cat in ("mktcap_top", "tradeval_top", "turnover_surge", "eps_revision"):
-            for s in stocks_data.get(cat, []):
-                records.append({
-                    "date": date, "session": session, "category": cat,
-                    "ticker": s.get("ticker", ""), "name": s.get("name"),
-                    "close": s.get("close"), "chg_pct": s.get("chg_pct"),
-                    "dollar_vol_b": s.get("dollar_vol_b"), "mktcap_b": s.get("mktcap_b"),
-                    "surge_ratio": s.get("surge_ratio"),
-                    "eps_chg_1m": s.get("eps_chg_1m"), "eps_chg_1w": s.get("eps_chg_1w"),
-                    "return_7d": s.get("return_7d"), "signal": s.get("signal"),
-                })
+            for cat in ("mktcap_top", "tradeval_top", "turnover_surge", "eps_revision"):
+                for s in stocks_data.get(cat, []):
+                    records.append({
+                        "date": date, "session": session, "category": cat,
+                        "ticker": s.get("ticker", ""), "name": s.get("name"),
+                        "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                        "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
+                        "dollar_vol_b": s.get("dollar_vol_b"),
+                        "mktcap_b": s.get("mktcap_b"),
+                        "surge_ratio": s.get("surge_ratio"),
+                        "eps_chg_1m": s.get("eps_chg_1m"),
+                        "eps_chg_1w": s.get("eps_chg_1w"),
+                        "return_7d": s.get("return_7d"),
+                        "signal": s.get("signal"),
+                    })
 
-        # ── Asia Overseas (JP/CN/HK) — major / featured / sectors ─────
+        # ── Asia Overseas (JP/CN/HK) ─────────────────────────────────
         for mk, mk_data in stocks_data.get("overseas_asia", {}).items():
             if not isinstance(mk_data, dict):
                 continue
-            for s in mk_data.get("major", []):
-                records.append({
-                    "date": date, "session": session, "category": f"{mk}_major",
-                    "ticker": s.get("ticker", ""), "name": s.get("name"),
-                    "market": s.get("sector"),
-                    "close": s.get("close"), "chg_pct": s.get("chg_pct"),
-                    "mktcap_b": s.get("mktcap_b"),
-                    "dollar_vol_b": s.get("trade_val_b"),
-                })
+            for sub_cat in ("major", "mktcap_top", "tradeval_top"):
+                for s in mk_data.get(sub_cat, []):
+                    records.append({
+                        "date": date, "session": session, "category": f"{mk}_{sub_cat}",
+                        "ticker": s.get("ticker", ""), "name": s.get("name"),
+                        "market": s.get("sector"),          # 섹터명 보존
+                        "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                        "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
+                        "mktcap_b": s.get("mktcap_b"),
+                        "dollar_vol_b": s.get("trade_val_b"),
+                    })
             for s in mk_data.get("featured", []):
                 records.append({
                     "date": date, "session": session, "category": f"{mk}_featured",
                     "ticker": s.get("ticker", ""), "name": s.get("name"),
                     "market": s.get("sector"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                     "surge_ratio": s.get("surge_ratio"),
                     "dollar_vol_b": s.get("trade_val_b"),
                     "signal": s.get("signal"),
@@ -462,11 +472,11 @@ class DBManager:
             for s in mk_data.get("sectors", []):
                 records.append({
                     "date": date, "session": session, "category": f"{mk}_sectors",
-                    "ticker": s.get("sector", ""),         # 섹터명을 ticker로
+                    "ticker": s.get("sector", ""),
                     "name":   s.get("sector"),
                     "chg_pct":  s.get("chg_wmean") or s.get("chg_avg"),
                     "mktcap_b": s.get("mktcap_b"),
-                    "volume":   s.get("n"),                 # 종목수를 volume에
+                    "volume":   s.get("n"),
                     "signal":   f"avg {s.get('chg_avg')}%",
                 })
 
@@ -474,21 +484,63 @@ class DBManager:
 
     @staticmethod
     def _records_to_stocks_data(rows: list) -> dict:
-        """DB rows → stocks_data dict (session-aware 재조립)."""
+        """DB rows → stocks_data dict 재조립.
+
+        - jp_* / cn_* / hk_* 카테고리 → overseas_asia 네스티드 구조로 복원
+        - Europe mktcap_top 등: market 컬럼 → index 키로 복원
+        """
         from collections import defaultdict
         buckets = defaultdict(list)
+        session_val = rows[0]["session"] if rows else ""
         for r in rows:
             buckets[r["category"]].append(dict(r))
 
-        def _clean(rec: dict) -> dict:
-            """None 값만 있는 필드 제거."""
-            return {k: v for k, v in rec.items()
-                    if k not in ("id", "date", "session", "category", "created_at")
-                    and v is not None}
+        STRIP = ("id", "date", "session", "category", "created_at")
 
-        result = {}
+        def _clean(rec: dict) -> dict:
+            return {k: v for k, v in rec.items()
+                    if k not in STRIP and v is not None}
+
+        def _clean_eu(rec: dict) -> dict:
+            """Europe 종목: market 컬럼을 index 키로도 노출."""
+            d = _clean(rec)
+            if "market" in d:
+                d.setdefault("index", d["market"])
+            return d
+
+        def _clean_ov(rec: dict) -> dict:
+            """Asia overseas 종목: market 컬럼을 sector 키로도 노출."""
+            d = _clean(rec)
+            if "market" in d:
+                d.setdefault("sector", d["market"])
+            return d
+
+        result: dict = {}
+        overseas_asia: dict = {}
+
         for cat, items in buckets.items():
-            result[cat] = [_clean(r) for r in items]
+            # Asia overseas 복원 (jp_*/cn_*/hk_*)
+            matched = False
+            for mk in ("jp", "cn", "hk"):
+                if cat.startswith(f"{mk}_"):
+                    sub = cat[len(f"{mk}_"):]   # major | featured | sectors | mktcap_top | tradeval_top
+                    if mk not in overseas_asia:
+                        overseas_asia[mk] = {}
+                    overseas_asia[mk][sub] = [_clean_ov(r) for r in items]
+                    matched = True
+                    break
+            if matched:
+                continue
+
+            # Europe 종목 카테고리 (market → index 복원)
+            if session_val == "europe" and cat in (
+                    "mktcap_top", "tradeval_top", "turnover_surge"):
+                result[cat] = [_clean_eu(r) for r in items]
+            else:
+                result[cat] = [_clean(r) for r in items]
+
+        if overseas_asia:
+            result["overseas_asia"] = overseas_asia
         return result
 
     # stocks_daily 바인딩 키 (Asia 전용 필드 포함). 누락된 키는 None으로 자동 채움.
@@ -497,6 +549,7 @@ class DBManager:
         "close", "chg_pct", "volume", "trade_val", "dollar_vol_b",
         "mktcap", "mktcap_b", "turnover", "surge_ratio",
         "eps_chg_1m", "eps_chg_1w", "return_7d",
+        "ret_1w", "ret_1m",
         "foreign_net", "inst_net", "signal",
     )
 
@@ -524,12 +577,14 @@ class DBManager:
                  close, chg_pct, volume, trade_val, dollar_vol_b,
                  mktcap, mktcap_b, turnover, surge_ratio,
                  eps_chg_1m, eps_chg_1w, return_7d,
+                 ret_1w, ret_1m,
                  foreign_net, inst_net, signal)
             VALUES
                 (:date, :session, :category, :ticker, :name, :market,
                  :close, :chg_pct, :volume, :trade_val, :dollar_vol_b,
                  :mktcap, :mktcap_b, :turnover, :surge_ratio,
                  :eps_chg_1m, :eps_chg_1w, :return_7d,
+                 :ret_1w, :ret_1m,
                  :foreign_net, :inst_net, :signal)
             ON CONFLICT(date, session, category, ticker) DO UPDATE SET
                 name         = excluded.name,
@@ -545,6 +600,8 @@ class DBManager:
                 eps_chg_1m   = COALESCE(excluded.eps_chg_1m,   eps_chg_1m),
                 eps_chg_1w   = COALESCE(excluded.eps_chg_1w,   eps_chg_1w),
                 return_7d    = COALESCE(excluded.return_7d,    return_7d),
+                ret_1w       = COALESCE(excluded.ret_1w,       ret_1w),
+                ret_1m       = COALESCE(excluded.ret_1m,       ret_1m),
                 foreign_net  = COALESCE(excluded.foreign_net,  foreign_net),
                 inst_net     = COALESCE(excluded.inst_net,     inst_net),
                 signal       = COALESCE(excluded.signal,       signal),

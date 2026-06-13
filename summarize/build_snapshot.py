@@ -57,21 +57,19 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
     today = target_date or date.today().strftime("%Y-%m-%d")
     db    = DBManager()
 
-    # 최근 5거래일 데이터 로드
+    # 최근 35일 데이터 로드 (1D/1W/1M 변동률 계산용)
     all_names_df = db.get_latest_by_name()
     if all_names_df.empty:
         return {"date": today, "session": session, "indices": {}, "macro": {}, "econ_upcoming": []}
 
     all_names = all_names_df["name"].tolist()
 
-    # 직전 2일치 wide pivot
-    df = db.get_recent(all_names, n_days=5)
+    df = db.get_recent(all_names, n_days=35)
     if df.empty:
         return {"date": today, "session": session, "indices": {}, "macro": {}, "econ_upcoming": []}
 
     df = df.sort_values("date")
 
-    # 날짜별 pivot
     pivot = df.pivot_table(index="date", columns="name", values="close", aggfunc="last")
     dates_sorted = sorted(pivot.index.tolist())
 
@@ -82,10 +80,10 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
         except (KeyError, TypeError, ValueError):
             return None
 
-    def latest_two(name):
-        vals = [(d, get_close(name, d)) for d in dates_sorted if get_close(name, d) is not None]
-        padded = [(None, None), (None, None)] + vals
-        return padded[-2:]
+    def latest_vals(name):
+        """최근 non-null 값 목록 반환 — (date, close) 내림차순."""
+        return [(d, get_close(name, d)) for d in reversed(dates_sorted)
+                if get_close(name, d) is not None]
 
     result_indices = {}
     result_macro   = {}
@@ -93,20 +91,28 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
     for _, row in all_names_df.iterrows():
         name = row["name"]
         cat  = row["category"]
-        sess = row["session"]
 
-        two = latest_two(name)
-        prev_date, prev_val = two[0]
-        cur_date,  cur_val  = two[1]
+        vals = latest_vals(name)
+        if not vals:
+            continue
 
-        chg = compute_chg_pct(cur_val, prev_val)
-        fl  = flag(chg, cat)
+        cur_date, cur_val   = vals[0]
+        _, prev_val         = vals[1]  if len(vals) > 1  else (None, None)
+        _, val_1w           = vals[5]  if len(vals) > 5  else (None, None)
+        _, val_1m           = vals[21] if len(vals) > 21 else (None, None)
+
+        chg    = compute_chg_pct(cur_val, prev_val)
+        chg_1w = compute_chg_pct(cur_val, val_1w)
+        chg_1m = compute_chg_pct(cur_val, val_1m)
+        fl     = flag(chg, cat)
 
         entry = {
             "close":    round(cur_val, 4) if cur_val is not None else None,
             "prev":     round(prev_val, 4) if prev_val is not None else None,
             "date":     cur_date,
             "chg_pct":  chg,
+            "chg_1w":   chg_1w,
+            "chg_1m":   chg_1m,
             "flag":     fl,
             "category": cat,
         }
@@ -161,17 +167,25 @@ def format_snapshot_text(snapshot: dict) -> str:
         date_tag  = "" if v["date"] == today else f"  ※전일종가({v['date']})"
         lines.append(f"  {name:15s}  {close_str}  ({chg_str})  {v['flag']}{date_tag}")
 
-    # 매크로 — 카테고리별 그룹
-    lines.append("\n[매크로]")
+    # 매크로 — 통합 표 (분류 | 지표 | 종가 | 1D% | 1W% | 1M%)
+    cat_label = {"fx": "FX", "rate": "금리", "commodity": "원자재", "volatility": "변동성"}
+    macro_rows = []
     for cat in ("fx", "rate", "commodity", "volatility"):
         items = {k: v for k, v in snapshot["macro"].items() if v["category"] == cat}
-        if not items:
-            continue
-        lines.append(f"  [{cat.upper()}]")
         for name, v in items.items():
-            chg_str   = f"{v['chg_pct']:+.2f}%" if v["chg_pct"] is not None else "N/A"
-            close_str = f"{v['close']:>10.4f}" if v["close"] is not None else "       N/A"
-            lines.append(f"    {name:15s}  {close_str}  ({chg_str})  {v['flag']}")
+            macro_rows.append((cat_label.get(cat, cat.upper()), name, v))
+
+    if macro_rows:
+        lines.append("\n[매크로]")
+        lines.append("| 분류 | 지표 | 종가 | 1D% | 1W% | 1M% |")
+        lines.append("|------|------|-----:|----:|----:|----:|")
+        for label, name, v in macro_rows:
+            close_s = f"{v['close']:.4f}" if v["close"] is not None else "N/A"
+            d1 = f"{v['chg_pct']:+.2f}%" if v.get("chg_pct") is not None else "-"
+            w1 = f"{v['chg_1w']:+.2f}%"  if v.get("chg_1w")  is not None else "-"
+            m1 = f"{v['chg_1m']:+.2f}%"  if v.get("chg_1m")  is not None else "-"
+            fl = v.get("flag", "")
+            lines.append(f"| {label} | {name}{fl} | {close_s} | {d1} | {w1} | {m1} |")
 
     # 주요 종목 / 특징주
     stocks = snapshot.get("stocks", {})

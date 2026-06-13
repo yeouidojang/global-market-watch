@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS stocks_daily (
     category     TEXT NOT NULL,          -- major | featured | sectors | top_stocks | mktcap_top | tradeval_top | turnover_surge | eps_revision
     ticker       TEXT NOT NULL,          -- yfinance ticker or RIC
     name         TEXT,
-    market       TEXT,                   -- KOSPI | KOSDAQ (asia only)
+    market       TEXT,                   -- KOSPI | KOSDAQ (korea) | DAX/FTSE/CAC (europe) | sector (asia overseas)
     close        REAL,
     chg_pct      REAL,
     volume       REAL,                   -- 거래량 (europe top_stocks)
@@ -67,6 +67,8 @@ CREATE TABLE IF NOT EXISTS stocks_daily (
     eps_chg_1m   REAL,                   -- 30일 EPS 추정치 변화율 (%) ← 핵심
     eps_chg_1w   REAL,                   -- 7일 EPS 추정치 변화율 (%)  ← 서브
     return_7d    REAL,                   -- 7일 누적 수익률 (us eps_revision)
+    ret_1w       REAL,                   -- 5거래일 수익률 (asia/us/europe 종목)
+    ret_1m       REAL,                   -- ~22거래일 수익률 (asia/us/europe 종목)
     foreign_net  REAL,                   -- 외국인 순매수 (원, asia investor_flow/featured)
     inst_net     REAL,                   -- 기관 순매수 (원, asia investor_flow/featured)
     signal       TEXT,
