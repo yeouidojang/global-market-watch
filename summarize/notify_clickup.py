@@ -35,7 +35,7 @@ WORKSPACE_ID  = os.getenv("CLICKUP_WORKSPACE_ID", "")
 DOC_ID        = os.getenv("CLICKUP_BRIEFING_DOC_ID", "")
 
 SESSION_LABEL = {
-    "asia": "ASIA 시황",
+    "asia": "Asia 시황",
     "us":   "Global 시황",
 }
 
@@ -44,17 +44,25 @@ def _normalize_tables(content: str) -> str:
     """마크다운 테이블 행 컬럼 수를 최댓값으로 통일.
 
     ClickUp API는 테이블 행 간 컬럼 수 불일치 시 400 반환.
-    LLM이 헤더/구분선을 N컬럼으로 생성했으나 데이터 행에 컬럼을 추가하는 경우 발생.
+    처리하는 두 가지 케이스:
+    1. 행 간 컬럼 수 불일치 — 짧은 행을 최대 컬럼 수로 패딩
+    2. `|`로 시작하지만 `|`로 끝나지 않는 잘린 행 — `|` 추가 후 패딩
+       (LLM max_tokens 초과로 마지막 행이 잘려서 생성되는 경우)
     """
     lines = content.split("\n")
     result: list[str] = []
     i = 0
     while i < len(lines):
-        # 연속된 테이블 행 수집
-        if lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+        stripped = lines[i].strip()
+        # | 로 시작하는 행이면 테이블 수집 (끝 | 없는 잘린 행 포함)
+        if stripped.startswith("|"):
             table: list[str] = []
-            while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
-                table.append(lines[i])
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                row = lines[i]
+                # 닫는 | 없으면 추가 (잘린 행 복구)
+                if not row.strip().endswith("|"):
+                    row = row.rstrip() + " |"
+                table.append(row)
                 i += 1
             # 각 행의 컬럼 수 계산 (양쪽 | 제외)
             col_counts = [row.count("|") - 1 for row in table]
