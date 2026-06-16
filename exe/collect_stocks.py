@@ -547,6 +547,12 @@ def _fetch_asia_market(chain: str, target_date: str,
     ret_1w_map: dict[str, float] = {}
     ret_1m_map: dict[str, float] = {}
     tv_chg_map: dict[str, float] = {}
+    # 날짜 불일치 보정용 맵 (hist가 target_date 미포함 시 meta_close 기준 재계산)
+    _hist_last_date:  dict[str, str]   = {}
+    _hist_last_close: dict[str, float] = {}  # hist[-1] close (= 어제)
+    _hist_1w_ref:     dict[str, float] = {}  # hist[-5] close (hist 미포함 시 오늘 기준 1W)
+    _hist_1m_ref:     dict[str, float] = {}  # hist[0] close (1M 기준)
+    _hist_last_tv:    dict[str, float] = {}  # hist[-1] trade_val (= 어제 거래대금)
     md_records: list[dict] = []
     if hist is not None and not hist.empty:
         hist.columns = [str(c).strip() for c in hist.columns]
@@ -586,27 +592,39 @@ def _fetch_asia_market(chain: str, target_date: str,
         # 분석용 등락률 / surge_ratio / 1W / 1M return
         for t, g in hist.groupby("ticker"):
             g = g[g["close"] > 0]
-            if len(g) >= 2:
+            n = len(g)
+            if n < 1:
+                continue
+
+            # 날짜 불일치 보정을 위한 기준값 저장
+            _hist_last_date[str(t)]  = str(g["date"].iloc[-1])[:10]
+            _hist_last_close[str(t)] = float(g["close"].iloc[-1])
+            if n >= 1:
+                _hist_1m_ref[str(t)] = float(g["close"].iloc[0])
+            if n >= 5:
+                _hist_1w_ref[str(t)] = float(g["close"].iloc[-5])
+
+            if n >= 2:
                 prev_close = float(g["close"].iloc[-2])
                 cur_close  = float(g["close"].iloc[-1])
                 if prev_close > 0:
                     chg_map[str(t)] = round((cur_close - prev_close) / prev_close * 100, 2)
-                # 1W: ~5거래일 전 (lookback 30일이므로 iloc[-6]이 5거래일 전)
-                if len(g) >= 6:
+                # 1W: hist[-1]이 today면 iloc[-6]이 5거래일 전, 아니면 보정 단계에서 재계산
+                if n >= 6:
                     c_1w = float(g["close"].iloc[-6])
                     if c_1w > 0:
                         ret_1w_map[str(t)] = round((cur_close - c_1w) / c_1w * 100, 2)
-                # 1M: ~22거래일 전 (lookback 30일이므로 iloc[0]이 ~22거래일 전)
+                # 1M: ~22거래일 전
                 first_close = float(g["close"].iloc[0])
                 if first_close > 0:
                     ret_1m_map[str(t)] = round((cur_close - first_close) / first_close * 100, 2)
                 # 거래대금 전일대비 Chg%
                 if "volume" in g.columns:
-                    _prev_cl = float(g["close"].iloc[-2])
                     _today_vol = g["volume"].fillna(0).iloc[-1]
                     _prev_vol  = g["volume"].fillna(0).iloc[-2]
-                    _today_tv = cur_close  * float(_today_vol)
-                    _prev_tv  = _prev_cl   * float(_prev_vol)
+                    _today_tv  = cur_close  * float(_today_vol)
+                    _prev_tv   = prev_close * float(_prev_vol)
+                    _hist_last_tv[str(t)] = _today_tv  # 어제 거래대금 (hist 미포함 시 사용)
                     if _prev_tv > 0:
                         tv_chg_map[str(t)] = round((_today_tv - _prev_tv) / _prev_tv * 100, 2)
             vols = g["volume"].dropna()
@@ -615,6 +633,43 @@ def _fetch_asia_market(chain: str, target_date: str,
                 past_avg  = float(vols.iloc[:-1].tail(5).mean())
                 if past_avg > 0:
                     surge_map[str(t)] = round(today_vol / past_avg, 2)
+
+        # ── 날짜 불일치 보정 ──────────────────────────────────────────────
+        # hist의 마지막 날짜가 target_date보다 이전이면 (LSEG 히스토리에 오늘 데이터 미포함):
+        # chg_pct/ret_1w/ret_1m을 meta_close(오늘) vs hist_last_close(어제) 기준으로 재계산
+        _meta_idx = meta.set_index(meta["ticker"].astype(str))
+        _corrected = 0
+        for _t, _last_dt in _hist_last_date.items():
+            if _last_dt >= target_date:
+                continue  # hist에 오늘 데이터 포함 → 이미 정확
+            if _t not in _meta_idx.index:
+                continue
+            _mrow = _meta_idx.loc[_t]
+            if isinstance(_mrow, pd.DataFrame):
+                _mrow = _mrow.iloc[0]
+            _meta_cl = _mrow.get("close") if isinstance(_mrow, pd.Series) else None
+            if _meta_cl is None or pd.isna(_meta_cl) or float(_meta_cl) <= 0:
+                continue
+            _meta_cl = float(_meta_cl)
+            _prev_cl = _hist_last_close[_t]   # hist[-1] = 어제 종가
+            if _prev_cl > 0:
+                chg_map[_t] = round((_meta_cl - _prev_cl) / _prev_cl * 100, 2)
+            _c1w = _hist_1w_ref.get(_t)       # hist[-5] = 오늘 기준 5거래일 전
+            if _c1w and _c1w > 0:
+                ret_1w_map[_t] = round((_meta_cl - _c1w) / _c1w * 100, 2)
+            _c1m = _hist_1m_ref.get(_t)
+            if _c1m and _c1m > 0:
+                ret_1m_map[_t] = round((_meta_cl - _c1m) / _c1m * 100, 2)
+            # tv_chg: 오늘 거래대금 = meta_close × meta_volume vs 어제 거래대금
+            _meta_vol = _mrow.get("volume") if isinstance(_mrow, pd.Series) else None
+            if _meta_vol is not None and pd.notna(_meta_vol) and float(_meta_vol) > 0:
+                _today_tv = _meta_cl * float(_meta_vol)
+                _prev_tv  = _hist_last_tv.get(_t, 0)
+                if _prev_tv > 0:
+                    tv_chg_map[_t] = round((_today_tv - _prev_tv) / _prev_tv * 100, 2)
+            _corrected += 1
+        if _corrected:
+            print(f"    [{market_key} date-fix] {_corrected}개 종목 chg/1W/1M meta_close 기준 재계산 (hist={_last_dt} < {target_date})")
 
     # market_daily 저장
     if md_records:
