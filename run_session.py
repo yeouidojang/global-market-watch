@@ -391,16 +391,32 @@ def _check_and_init_history():
     return True
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--session", required=True,
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        prog="global-market-watch",
+        description="Global Market Watch 파이프라인 (수집 → 브리핑 → Slack)",
+    )
+    parser.add_argument("--session", default=None,
                         choices=["asia", "europe", "us", "global", "all"],
-                        help="global: Europe+US 통합 파이프라인 (06:10 스케줄)")
+                        help="실행 세션. 플래그(--global 등)로 대체 가능")
+    # 플래그 스타일 세션 선택 (예: global-market-watch --global --date 2026-06-18)
+    grp = parser.add_mutually_exclusive_group()
+    grp.add_argument("--asia",   dest="session_flag", action="store_const", const="asia")
+    grp.add_argument("--europe", dest="session_flag", action="store_const", const="europe")
+    grp.add_argument("--us",     dest="session_flag", action="store_const", const="us")
+    grp.add_argument("--global", dest="session_flag", action="store_const", const="global",
+                     help="Europe+US 통합 파이프라인 (06:10 스케줄)")
+    grp.add_argument("--all",    dest="session_flag", action="store_const", const="all")
     parser.add_argument("--date", default=None,
                         help="기준일 YYYY-MM-DD (기본: 오늘)")
     parser.add_argument("--no-llm",    action="store_true")
     parser.add_argument("--no-notify", action="store_true")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+
+    session = args.session or args.session_flag
+    if not session:
+        parser.error("세션을 지정하세요 (예: --global 또는 --session global)")
+    args.session = session
 
     # 히스토리 체크
     if not _check_and_init_history():
@@ -431,6 +447,9 @@ def main():
         skip_notify=args.no_notify,
     )
 
+
+# 콘솔 스크립트 entry point 별칭
+cli = main
 
 
 if __name__ == "__main__":

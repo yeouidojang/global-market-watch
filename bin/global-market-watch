@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# global-market-watch — 콘솔 실행 래퍼
+# 사용 예: global-market-watch --global --date 2026-06-18
+set -euo pipefail
+
+# 이 스크립트의 위치 기준으로 프로젝트 루트 결정 (bin/ 의 상위)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+cd "$PROJECT_DIR"
+
+# 가상환경 자동 활성화 (있으면)
+for VENV in venv .venv env; do
+    if [[ -f "$PROJECT_DIR/$VENV/bin/activate" ]]; then
+        # shellcheck disable=SC1090
+        source "$PROJECT_DIR/$VENV/bin/activate"
+        break
+    fi
+done
+
+exec python run_session.py "$@"

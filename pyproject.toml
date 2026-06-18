@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "global-market-watch"
+version = "0.1.0"
+description = "아시아·유럽·미국 증시·매크로 시황 자동 브리핑 파이프라인"
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+# 패키지가 아닌 단일 모듈 + 서브패키지 구조이므로 명시적으로 지정
+py-modules = ["run_session", "scheduler"]
+packages = ["config", "db", "exe", "summarize"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.package-data]
+config = ["*.yaml"]
+db = ["*.sql"]
+
+[project.scripts]
+global-market-watch = "run_session:cli"
