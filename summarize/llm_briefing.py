@@ -630,6 +630,84 @@ Chg%는 거래대금 전일대비 변화율입니다.
 """
 
 
+def _all_chg_zero(stocks: list) -> bool:
+    """종목 리스트의 등락률(chg_pct)이 전부 0 또는 None인지 판정."""
+    if not stocks:
+        return False
+    return all(s.get("chg_pct") is None or float(s.get("chg_pct")) == 0.0
+               for s in stocks)
+
+
+def _validate_stocks_data(session: str, target_date: str, stocks_data: dict) -> None:
+    """Claude API 호출 전 종목 데이터 무결성 검증 (전 세션·전 시장).
+
+    각 시장의 개별주 그룹이 DB에서 비어있거나 등락률이 전부 0/None인
+    (수집 누락·date-fix 실패 등으로 '숫자가 안 나온') 경우 브리핑 생성을
+    중단하고 에러를 발생시킨다. 잘못된 데이터로 LLM 토큰을 낭비하지 않기 위함.
+    """
+    sd = stocks_data or {}
+    errors: list[str] = []
+
+    def _check(label: str, stocks: list, require_nonempty: bool = True) -> None:
+        if not stocks:
+            if require_nonempty:
+                errors.append(f"{label}: 종목 데이터 없음")
+            return
+        if _all_chg_zero(stocks):
+            errors.append(
+                f"{label}: {len(stocks)}종목 모두 등락률 0/None "
+                f"(수집 누락·date-fix 실패 의심)")
+
+    if session == "asia":
+        # 한국 (KOSPI + KOSDAQ)
+        kr_major = ((sd.get("major") or [])
+                    + (sd.get("major_kospi") or [])
+                    + (sd.get("major_kosdaq") or []))
+        kr_feat  = ((sd.get("featured") or [])
+                    + (sd.get("featured_kospi") or [])
+                    + (sd.get("featured_kosdaq") or []))
+        _check("한국 주요종목(KOSPI·KOSDAQ)", kr_major)
+        _check("한국 특징주", kr_feat, require_nonempty=False)
+        # 일본·중국·홍콩
+        overseas = sd.get("overseas_asia", {})
+        for mk, label in (("jp", "일본(Nikkei225)"),
+                          ("cn", "중국(CSI300)"),
+                          ("hk", "홍콩(HSI)")):
+            mk_data = overseas.get(mk, {})
+            stocks: list = []
+            for sub in ("major", "mktcap_top", "tradeval_top", "featured"):
+                stocks.extend(mk_data.get(sub, []) or [])
+            _check(label, stocks)
+
+    elif session == "europe":
+        eu: list = []
+        for sub in ("mktcap_top", "tradeval_top", "top_stocks"):
+            eu.extend(sd.get(sub, []) or [])
+        _check("유럽 종목(DAX·FTSE·CAC)", eu)
+        _check("유럽 거래대금 급증주", sd.get("turnover_surge") or [],
+               require_nonempty=False)
+
+    elif session == "us":
+        us: list = []
+        for sub in ("mktcap_top", "tradeval_top", "top_stocks"):
+            us.extend(sd.get(sub, []) or [])
+        _check("미국 종목(SPX·NDX)", us)
+        _check("미국 거래대금 급증주", sd.get("turnover_surge") or [],
+               require_nonempty=False)
+        # Europe Sub (US 세션 내 유럽 독립 섹션)
+        eu_sub = sd.get("europe_stocks", {})
+        eu_stocks: list = []
+        for sub in ("mktcap_top", "tradeval_top", "top_stocks"):
+            eu_stocks.extend(eu_sub.get(sub, []) or [])
+        _check("유럽 종목(US세션 Sub)", eu_stocks, require_nonempty=False)
+
+    if errors:
+        detail = " | ".join(errors)
+        raise ValueError(
+            f"[{session} 종목 데이터 검증 실패] {target_date} DB 데이터 비정상 → "
+            f"Claude 브리핑 생성 중단: {detail}")
+
+
 def generate_briefing(session: str, target_date: str = None,
                       save: bool = True, stocks_data: dict = None) -> str:
     today = target_date or date.today().strftime("%Y-%m-%d")
@@ -670,14 +748,24 @@ def generate_briefing(session: str, target_date: str = None,
     snapshot = build_snapshot(session, today, stocks_data=stocks_data)
     snapshot_text = format_snapshot_text(snapshot)
 
+    # Claude API 호출 전 DB 데이터 무결성 검증 (전 세션·전 시장 종목 데이터)
+    _validate_stocks_data(session, today, stocks_data)
+
     print("[llm_briefing] Claude API 호출 중...")
-    client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    # Prevent indefinite blocking on network/model latency.
+    timeout_secs = float(os.getenv("ANTHROPIC_TIMEOUT_SECS", "180"))
+    max_retries = int(os.getenv("ANTHROPIC_MAX_RETRIES", "1"))
+    client = anthropic.Anthropic(
+        api_key=os.getenv("ANTHROPIC_API_KEY"),
+        timeout=timeout_secs,
+        max_retries=max_retries,
+    )
 
     has_stocks = bool(stocks_data and any(stocks_data.get(k) for k in
                       ("major", "featured", "sectors", "top_stocks",
                        "mktcap_top", "tradeval_top", "turnover_surge", "europe_stocks")))
-    # US 세션은 Europe 독립 섹션 추가로 출력이 길어지므로 max_tokens 확장
-    max_tok = 8000 if session == "us" else 6000
+    # 운영 브리핑 길이 증가에 맞춰 세션 공통 출력 상한을 확장.
+    max_tok = 10000
     message = client.messages.create(
         model=MODEL,
         max_tokens=max_tok,

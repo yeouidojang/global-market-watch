@@ -154,6 +154,19 @@ class DBManager:
         conn.close()
         return df
 
+    def get_by_date(self, target_date: str) -> pd.DataFrame:
+        """특정 날짜의 모든 market_daily 레코드 반환."""
+        sql = """
+            SELECT date, session, category, name, close, open, high, low
+            FROM market_daily
+            WHERE date = ?
+            ORDER BY session, category, name
+        """
+        conn = self._connect()
+        df = pd.read_sql_query(sql, conn, params=[target_date])
+        conn.close()
+        return df
+
     def get_stocks_universe(self, session: str, start_date: str,
                             end_date: str = None) -> pd.DataFrame:
         """

@@ -11,6 +11,7 @@ import os
 import sys
 import io
 import json
+import math
 
 if hasattr(sys.stdout, 'buffer') and sys.stdout.encoding.lower() != 'utf-8':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -33,6 +34,7 @@ SESSION_EMOJI = {
 }
 
 BLOCK_MAX = 3000  # Slack section 블록 1개 한도
+MAX_BLOCKS_PER_MSG = 45  # Slack 한 메시지 블록 제한(여유치)
 
 
 def _text_to_blocks(text: str) -> list[dict]:
@@ -48,12 +50,15 @@ def _text_to_blocks(text: str) -> list[dict]:
     paragraphs = re.split(r'\n{2,}', text)
     blocks, chunk = [], ""
     for para in paragraphs:
-        addition = para + "\n\n"
-        if chunk and len(chunk) + len(addition) > BLOCK_MAX:
-            blocks.append(make_block(chunk))
-            chunk = addition
-        else:
-            chunk += addition
+        # 단락 자체가 BLOCK_MAX를 넘는 경우 강제 분할
+        para_parts = [para[i:i + BLOCK_MAX] for i in range(0, len(para), BLOCK_MAX)] or [""]
+        for idx, part in enumerate(para_parts):
+            addition = part + ("\n\n" if idx == len(para_parts) - 1 else "")
+            if chunk and len(chunk) + len(addition) > BLOCK_MAX:
+                blocks.append(make_block(chunk))
+                chunk = addition
+            else:
+                chunk += addition
     if chunk.strip():
         blocks.append(make_block(chunk))
     return blocks
@@ -64,16 +69,18 @@ def _send_raw(text: str) -> bool:
     if not WEBHOOK_URL:
         raise RuntimeError("SLACK_WEBHOOK_URL이 .env에 없습니다.")
 
-    payload = {"blocks": _text_to_blocks(text[:BLOCK_MAX * 4])}
-    resp = requests.post(
-        WEBHOOK_URL,
-        data=json.dumps(payload),
-        headers={"Content-Type": "application/json"},
-        timeout=10,
-        verify=False,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Slack 발송 실패: {resp.status_code} {resp.text}")
+    blocks = _text_to_blocks(text)
+    for i in range(0, len(blocks), MAX_BLOCKS_PER_MSG):
+        payload = {"blocks": blocks[i:i + MAX_BLOCKS_PER_MSG]}
+        resp = requests.post(
+            WEBHOOK_URL,
+            data=json.dumps(payload),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+            verify=False,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"Slack 발송 실패: {resp.status_code} {resp.text}")
     return True
 
 
@@ -118,7 +125,8 @@ def _consolidate_parts(units: list[str], target_parts: int | None = None) -> lis
     Parameters
     ----------
     units        : _split_units()가 반환한 분할 후보 (섹션 + 단락 혼합)
-    target_parts : 강제 파트 수. None이면 자동(<4500자=2, 그 이상=3).
+    target_parts : 강제 파트 수. None이면 전체 길이를 기준으로
+                   ceil(total_len / PART_TARGET_LEN) 만큼 자동 생성.
                    단위 수가 적으면 그만큼만 생성.
     """
     if not units:
@@ -128,7 +136,7 @@ def _consolidate_parts(units: list[str], target_parts: int | None = None) -> lis
     total = sum(len(s) for s in units) + max(0, len(units) - 1) * sep_len
 
     if target_parts is None:
-        target_parts = 3 if total >= PART_TARGET_LEN else 2
+        target_parts = max(1, math.ceil(total / PART_TARGET_LEN))
     target_parts = max(1, min(target_parts, len(units)))
 
     if target_parts == 1:

@@ -158,14 +158,22 @@ def format_snapshot_text(snapshot: dict) -> str:
     lines = []
     lines.append(f"=== {snapshot['date']} {snapshot['session'].upper()} 세션 시장 데이터 ===\n")
 
-    # 지수
+    # 지수 — 통합 표 (지수 | 종가 | 1D% | 1W% | 1M%)
     today = snapshot["date"]
-    lines.append("[주요 지수]")
-    for name, v in snapshot["indices"].items():
-        chg_str   = f"{v['chg_pct']:+.2f}%" if v["chg_pct"] is not None else "N/A"
-        close_str = f"{v['close']:>10.2f}" if v["close"] is not None else "       N/A"
-        date_tag  = "" if v["date"] == today else f"  ※전일종가({v['date']})"
-        lines.append(f"  {name:15s}  {close_str}  ({chg_str})  {v['flag']}{date_tag}")
+    if snapshot["indices"]:
+        lines.append("[주요 지수]")
+        lines.append("| 지수 | 종가 | 1D% | 1W% | 1M% |")
+        lines.append("|------|-----:|----:|----:|----:|")
+        for name, v in snapshot["indices"].items():
+            close_s = f"{v['close']:.2f}" if v["close"] is not None else "N/A"
+            d1 = f"{v['chg_pct']:+.2f}%" if v.get("chg_pct") is not None else "-"
+            w1 = f"{v['chg_1w']:+.2f}%" if v.get("chg_1w") is not None else "-"
+            m1 = f"{v['chg_1m']:+.2f}%" if v.get("chg_1m") is not None else "-"
+            fl = v.get("flag", "")
+            name_tag = f"{name}{fl}"
+            if v.get("date") != today:
+                name_tag = f"{name_tag} (전일:{v['date']})"
+            lines.append(f"| {name_tag} | {close_s} | {d1} | {w1} | {m1} |")
 
     # 매크로 — 통합 표 (분류 | 지표 | 종가 | 1D% | 1W% | 1M%)
     cat_label = {"fx": "FX", "rate": "금리", "commodity": "원자재", "volatility": "변동성"}

@@ -473,6 +473,30 @@ ASIA_OVERSEAS_MARKETS = [
     {"key": "hk", "name": "HSI",       "chain": "0#.HSI",     "currency": "HKD", "min_tv":   100_000_000},  # 1억HKD
 ]
 
+ASIA_LSEG_RETRIES = 3
+ASIA_LSEG_RETRY_BASE_SECS = 1
+ASIA_LSEG_HIST_BATCH_SIZE = 100
+
+
+def _asia_lseg_get_data(ld, universe, fields, parameters=None,
+                        label: str = "", retries: int = ASIA_LSEG_RETRIES):
+    """LSEG get_data with simple retry/backoff for transient read timeouts."""
+    import time
+
+    last_error = None
+    for attempt in range(1, retries + 1):
+        try:
+            return ld.get_data(universe=universe, fields=fields, parameters=parameters)
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retries:
+                break
+            wait_secs = ASIA_LSEG_RETRY_BASE_SECS * (2 ** (attempt - 1))
+            if label:
+                print(f"    [{label} attempt={attempt}] {exc} → retry in {wait_secs}s")
+            time.sleep(wait_secs)
+    raise last_error
+
 
 def _fetch_asia_market(chain: str, target_date: str,
                        market_key: str = "",
@@ -492,7 +516,8 @@ def _fetch_asia_market(chain: str, target_date: str,
 
     # ── 1. 종목 메타 + 당일 스냅샷 (시총·종가·거래량·섹터) ──────────
     try:
-        meta = ld.get_data(
+        meta = _asia_lseg_get_data(
+            ld,
             universe=chain,
             fields=[
                 "TR.RIC", "TR.CompanyName",
@@ -501,6 +526,7 @@ def _fetch_asia_market(chain: str, target_date: str,
                 "TR.Volume",
                 "TR.GICSSector",
             ],
+            label=f"{chain} meta",
         )
     except Exception as e:
         print(f"    [{chain} meta ERROR] {e}")
@@ -529,18 +555,26 @@ def _fetch_asia_market(chain: str, target_date: str,
     tickers = meta["ticker"].astype(str).tolist()
 
     # ── 2. lookback OHLCV (등락률·거래량 surge 계산 + market_daily 저장) ─
-    try:
-        hist = ld.get_data(
-            universe=tickers,
-            fields=[
-                "TR.PriceOpen", "TR.PriceHigh", "TR.PriceLow",
-                "TR.PriceClose", "TR.Volume", "TR.PriceClose.date",
-            ],
-            parameters={"SDate": f"-{lookback_days}D", "EDate": "0D", "Frq": "D"},
-        )
-    except Exception as e:
-        print(f"    [{chain} hist ERROR] {e}")
-        hist = pd.DataFrame()
+    hist_parts: list[pd.DataFrame] = []
+    hist_params = {"SDate": f"-{lookback_days}D", "EDate": "0D", "Frq": "D"}
+    for start_idx in range(0, len(tickers), ASIA_LSEG_HIST_BATCH_SIZE):
+        batch = tickers[start_idx:start_idx + ASIA_LSEG_HIST_BATCH_SIZE]
+        try:
+            part = _asia_lseg_get_data(
+                ld,
+                universe=batch,
+                fields=[
+                    "TR.PriceOpen", "TR.PriceHigh", "TR.PriceLow",
+                    "TR.PriceClose", "TR.Volume", "TR.PriceClose.date",
+                ],
+                parameters=hist_params,
+                label=f"{chain} hist batch {start_idx // ASIA_LSEG_HIST_BATCH_SIZE + 1}",
+            )
+            if part is not None and not part.empty:
+                hist_parts.append(part)
+        except Exception as e:
+            print(f"    [{chain} hist ERROR] batch {start_idx // ASIA_LSEG_HIST_BATCH_SIZE + 1}: {e}")
+    hist = pd.concat(hist_parts, ignore_index=True) if hist_parts else pd.DataFrame()
 
     chg_map: dict[str, float] = {}
     surge_map: dict[str, float] = {}
@@ -1018,7 +1052,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
                         for _, row in mc_part.iterrows():
                             tk = str(row.get("Instrument", "")).strip()
                             cap = row.get("Company Market Cap")
-                            if tk and pd.notna(cap) and cap:
+                            if tk and pd.notna(cap):
                                 mktcap_b_map[tk] = round(float(cap) / 1e9, 2)
                     _success = True
                     break
@@ -1331,14 +1365,21 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
                         for _, row in part.iterrows():
                             ticker = str(row.get("Instrument", "")).strip()
                             mktcap = row.get("Company Market Cap")
-                            if ticker and pd.notna(mktcap) and mktcap:
+                            if ticker and pd.notna(mktcap):
                                 result.setdefault(ticker, {})["mktcap_b"] = round(float(mktcap) / 1e9, 2)  # → USD B
-                            name = (row.get("Company Common Name") or row.get("Company Name")
-                                    or row.get("Common Name"))
-                            if ticker and name and pd.notna(name):
+                            name = None
+                            for name_candidate in (
+                                row.get("Company Common Name"),
+                                row.get("Company Name"),
+                                row.get("Common Name"),
+                            ):
+                                if pd.notna(name_candidate):
+                                    name = name_candidate
+                                    break
+                            if ticker and pd.notna(name):
                                 result.setdefault(ticker, {})["name"] = str(name)[:40]
                             sector = row.get("GICS Sector Name")
-                            if ticker and sector and pd.notna(sector):
+                            if ticker and pd.notna(sector):
                                 result.setdefault(ticker, {})["sector"] = str(sector)
                     success = True
                     break
@@ -1666,7 +1707,7 @@ def fetch_us_stocks(
                       key=lambda t: lseg_meta[t]["eps_chg_1m"])
 
     eps_revision = []
-    for t in (eps_up[:5] + eps_down[:5]):
+    for t in (eps_up[:10] + eps_down[:10]):
         chg_1m = lseg_meta[t]["eps_chg_1m"]
         e = _entry(t, f"EPS{'상향' if chg_1m > 0 else '하향'}1M{chg_1m:+.1f}%")
         # 7일 누적 수익률

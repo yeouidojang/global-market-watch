@@ -578,13 +578,97 @@ def fetch_krx_vkospi(target_date: str, lookback_days: int = 7) -> list[dict]:
 # ------------------------------------------------------------------ #
 #  메인
 # ------------------------------------------------------------------ #
+#  히스토리 초기화 (1회)
+# ------------------------------------------------------------------ #
+def initialize_history_batch(days_back: int = 180):
+    """
+    과거 N일의 지수 + 매크로 데이터를 배치 수집.
+    DB에 이미 있는 날짜는 skip하고, 없는 날짜만 수집.
+    
+    args:
+        days_back: 과거 몇 일을 수집할지 (기본: 180일)
+    """
+    print(f"\n[initialize_history_batch] 과거 {days_back}일 히스토리 수집 시작...")
+    
+    indices_cfg = load_yaml("indices.yaml")
+    macro_cfg   = load_yaml("macro.yaml")
+    db = DBManager()
+    
+    today = date.today()
+    start_date = today - timedelta(days=days_back)
+    
+    # 수집 대상 날짜 생성 (평일만, 거래일 기준)
+    dates_to_collect = []
+    current = start_date
+    while current < today:
+        if current.weekday() < 5:  # 월-금
+            dates_to_collect.append(current.strftime("%Y-%m-%d"))
+        current += timedelta(days=1)
+    
+    print(f"  수집 대상: {len(dates_to_collect)} 영업일")
+    
+    lseg_open()
+    try:
+        total_indices = 0
+        total_macro = 0
+        skipped_dates = 0
+        
+        for idx, target_date in enumerate(dates_to_collect, 1):
+            # DB에 이미 해당 날짜의 지수 데이터가 있으면 skip
+            existing = db.get_by_date(target_date)
+            if not existing.empty and len(existing) > 10:  # 충분한 데이터가 있으면 skip
+                skipped_dates += 1
+                if idx % 20 == 0:
+                    print(f"  진행 중... {idx}/{len(dates_to_collect)} (skip: {skipped_dates})")
+                continue
+            
+            # 지수 수집
+            for session in ["asia", "europe", "us"]:
+                n = collect_indices(session, target_date, indices_cfg, db)
+                total_indices += n
+            
+            # 매크로 수집 (1회/날짜)
+            n = collect_macro(target_date, macro_cfg, db)
+            total_macro += n
+            
+            if idx % 20 == 0:
+                print(f"  진행 중... {idx}/{len(dates_to_collect)} (indices: {total_indices}, macro: {total_macro})")
+        
+        print(f"\n[initialize_history_batch] 완료")
+        print(f"  총 지수 레코드: {total_indices}")
+        print(f"  총 매크로 레코드: {total_macro}")
+        print(f"  스킵된 날짜: {skipped_dates}")
+        return True
+        
+    except Exception as e:
+        print(f"[initialize_history_batch] 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+    finally:
+        lseg_close()
+
+
+# ------------------------------------------------------------------ #
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--session", default="all",
                         choices=["asia", "europe", "us", "all"])
     parser.add_argument("--date", default=None,
                         help="수집 기준일 YYYY-MM-DD (기본: 오늘)")
+    parser.add_argument("--init-history", action="store_true",
+                        help="과거 180일 히스토리 1회 초기화 (시작 시 1회만 실행)")
+    parser.add_argument("--days-back", type=int, default=180,
+                        help="히스토리 초기화 기간 (일, 기본: 180)")
     args = parser.parse_args()
+
+    # 히스토리 초기화 (--init-history 플래그)
+    if args.init_history:
+        success = initialize_history_batch(days_back=args.days_back)
+        if not success:
+            print("[main] 히스토리 초기화 실패")
+            sys.exit(1)
+        return
 
     target_date = args.date or date.today().strftime("%Y-%m-%d")
     print(f"[collect_macro] session={args.session}  date={target_date}")

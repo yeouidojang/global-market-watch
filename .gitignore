@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+*.log
+logs/
+db/*.db
+_tmp*
+_inv*
+.env

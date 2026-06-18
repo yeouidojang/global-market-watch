@@ -39,6 +39,7 @@ import urllib3; urllib3.disable_warnings()
 
 import sys
 import argparse
+import pandas as pd
 from datetime import date, timedelta, datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
@@ -69,6 +70,15 @@ def _default_date(session: str) -> str:
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR.parent / ".env")
 sys.path.insert(0, str(BASE_DIR))
+
+
+def _archive_briefing_text(session: str, target_date: str, briefing_id: int, content: str) -> Path:
+    """브리핑 원문을 TXT 파일로 보관하고 저장 경로를 반환."""
+    out_dir = BASE_DIR / "logs" / "briefings_txt" / session
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{target_date}_id{briefing_id}.txt"
+    out_path.write_text(content or "", encoding="utf-8")
+    return out_path
 
 
 def run_session(session: str, target_date: str,
@@ -193,6 +203,14 @@ def run_session(session: str, target_date: str,
     from summarize.notify_slack import send_briefing
     latest = db.get_latest_briefing(session)
     if latest:
+        if session == "asia":
+            txt_path = _archive_briefing_text(
+                session=session,
+                target_date=target_date,
+                briefing_id=latest["id"],
+                content=latest.get("content", content),
+            )
+            print(f"  [txt 저장] {txt_path}")
         send_briefing(briefing_id=latest["id"], session=session, date=target_date)
 
     if session != "europe":
@@ -317,6 +335,13 @@ def run_global_pipeline(target_date: str,
     from summarize.notify_slack import send_briefing
     latest = db.get_latest_briefing("us")
     if latest:
+        txt_path = _archive_briefing_text(
+            session="us",
+            target_date=target_date,
+            briefing_id=latest["id"],
+            content=latest.get("content", us_content),
+        )
+        print(f"  [txt 저장] {txt_path}")
         send_briefing(briefing_id=latest["id"], session="us", date=target_date)
 
     try:
@@ -326,6 +351,44 @@ def run_global_pipeline(target_date: str,
         print(f"  [ClickUp 발송 ERROR] {_cu_e}")
 
     print(f"\n✅ 완료: EUROPE+US 통합 파이프라인")
+
+
+
+def _check_and_init_history():
+    """DB 히스토리 상태 확인 및 필요 시 초기화 안내."""
+    from db.db_manager import DBManager
+    import pandas as pd
+    
+    db = DBManager()
+    conn = db._connect()
+    try:
+        result = conn.execute(
+            """SELECT COUNT(*), MIN(date), MAX(date) 
+               FROM market_daily WHERE category='index'"""
+        ).fetchone()
+    finally:
+        conn.close()
+    
+    if not result or result[0] == 0:
+        print("\n" + "="*60)
+        print("[경고] DB에 지수 히스토리 데이터가 없습니다.")
+        print("="*60)
+        print("\n다음 명령어로 180일 히스토리를 초기화하세요 (1회만 실행):")
+        print("  python exe/collect_macro.py --init-history")
+        print("\n이 과정에는 수 분이 소요될 수 있습니다.")
+        print("초기화 후 다시 run_session.py를 실행해주세요.\n")
+        return False
+    
+    count, min_date, max_date = result
+    date_range = (pd.Timestamp(max_date) - pd.Timestamp(min_date)).days
+    
+    if date_range < 25:  # 25영업일 미만 (약 1개월)
+        print(f"\n[경고] 지수 히스토리가 부족합니다: {count}개 레코드, 범위 {min_date}~{max_date}")
+        print("→ 180일 히스토리 초기화를 권장합니다: python exe/collect_macro.py --init-history\n")
+        return False
+    
+    print(f"[정보] DB 지수 데이터: {count}개 레코드, 범위 {min_date}~{max_date} ({date_range}일)")
+    return True
 
 
 def main():
@@ -338,6 +401,10 @@ def main():
     parser.add_argument("--no-llm",    action="store_true")
     parser.add_argument("--no-notify", action="store_true")
     args = parser.parse_args()
+
+    # 히스토리 체크
+    if not _check_and_init_history():
+        sys.exit(1)
 
     target_date = args.date or _default_date(args.session)
 
@@ -363,6 +430,7 @@ def main():
         skip_llm=args.no_llm,
         skip_notify=args.no_notify,
     )
+
 
 
 if __name__ == "__main__":
