@@ -1,0 +1,33 @@
+name: Deploy to Digital Ocean
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+            cd ~/global_market_watch
+
+            echo "=== git pull ==="
+            git pull origin main
+
+            echo "=== pip install (변경 시) ==="
+            .venv/bin/pip install -q -r requirements.txt
+
+            echo "=== 서비스 재시작 ==="
+            sudo systemctl restart market-watch
+
+            sleep 2
+
+            echo "=== 상태 확인 ==="
+            systemctl is-active market-watch && echo "✅ market-watch 정상 실행 중" || echo "❌ 서비스 시작 실패"
