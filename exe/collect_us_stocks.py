@@ -1,7 +1,10 @@
 """
 SPX 구성종목 OHLCV 일별 수집 (yfinance)
 
-티커 소스: C:/mquant/spx_constituents_prices_2026-02-12.csv (RIC 헤더 → yfinance 변환)
+티커 소스 (우선순위):
+  1. SPX_CSV_PATH 환경변수 또는 data/spx_constituents.csv (있는 경우)
+  2. LSEG get_data(universe="0#.SPX")
+  3. Wikipedia S&P 500 목록 (폴백)
 저장 대상: DB us_stocks_daily 테이블
 
 사용법:
@@ -10,20 +13,23 @@ SPX 구성종목 OHLCV 일별 수집 (yfinance)
     python exe/collect_us_stocks.py --start 2026-06-01 --end 2026-06-19
 """
 
+import os
 import sys
 import argparse
 import warnings
 from pathlib import Path
+from dotenv import load_dotenv
 
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 from db.db_manager import DBManager
 
-# S&P500 구성종목 CSV (RIC 컬럼 헤더 기반)
-SPX_CSV_PATH = Path("C:/mquant/spx_constituents_prices_2026-02-12.csv")
+# S&P500 구성종목 CSV — 환경변수 SPX_CSV_PATH 또는 data/ 하위 기본 경로
+SPX_CSV_PATH = Path(os.getenv("SPX_CSV_PATH", str(BASE_DIR / "data" / "spx_constituents.csv")))
 
 # RIC suffix 제거 + 특수 케이스 매핑
 _RIC_SPECIALS = {
@@ -40,20 +46,66 @@ def _ric_to_yf(ric: str) -> str | None:
     return base
 
 
-def load_spx_tickers() -> list[str]:
-    """CSV 헤더에서 yfinance ticker 목록 반환."""
-    if not SPX_CSV_PATH.exists():
-        print(f"[ERROR] CSV not found: {SPX_CSV_PATH}")
+def _fetch_spx_tickers_lseg() -> list[str]:
+    """LSEG Chain RIC(0#.SPX)으로 S&P 500 구성종목 티커 조회."""
+    import lseg.data as ld
+
+    session_opened = False
+    try:
+        try:
+            state = ld.session.get_default().open_state.name
+        except Exception:
+            state = "Closed"
+        if state != "Opened":
+            cfg_path = os.getenv("LSEG_CONFIG_PATH", str(Path.home() / "lseg-data.config.json"))
+            ld.open_session(config_name=cfg_path)
+            session_opened = True
+
+        df = ld.get_data(universe="0#.SPX", fields=["TR.RIC"])
+        if df is None or df.empty:
+            return []
+
+        rics = df["Instrument"].dropna().tolist()
+        tickers = [_ric_to_yf(str(r)) for r in rics]
+        tickers = [t for t in tickers if t]
+        print(f"[INFO] LSEG SPX 구성종목: {len(tickers)}개")
+        return tickers
+    except Exception as e:
+        print(f"[WARN] LSEG SPX 구성종목 조회 실패: {e}")
         return []
-    cols = pd.read_csv(SPX_CSV_PATH, nrows=0).columns.tolist()
-    tickers = []
-    for c in cols:
-        if c.lower() == "date":
-            continue
-        yf_t = _ric_to_yf(c)
-        if yf_t:
-            tickers.append(yf_t)
-    return tickers
+    finally:
+        if session_opened:
+            try:
+                ld.close_session()
+            except Exception:
+                pass
+
+
+def load_spx_tickers() -> list[str]:
+    """yfinance ticker 목록 반환.
+
+    우선순위: CSV → LSEG(0#.SPX)
+    LSEG 실패 시 Slack 알림 후 RuntimeError 발생.
+    """
+    if SPX_CSV_PATH.exists():
+        cols = pd.read_csv(SPX_CSV_PATH, nrows=0).columns.tolist()
+        tickers = [_ric_to_yf(c) for c in cols if c.lower() != "date"]
+        tickers = [t for t in tickers if t]
+        if tickers:
+            return tickers
+
+    print("[INFO] SPX CSV 없음 → LSEG에서 SPX 구성종목 조회")
+    tickers = _fetch_spx_tickers_lseg()
+    if tickers:
+        return tickers
+
+    msg = "🚨 *Market Watch 오류* [collect_us_stocks]\nLSEG SPX 구성종목 조회 실패 — 파이프라인 중단"
+    try:
+        from summarize.notify_slack import send_text
+        send_text(msg)
+    except Exception:
+        pass
+    raise RuntimeError("LSEG SPX 구성종목 조회 실패")
 
 
 def fetch_ohlcv(tickers: list[str], start: str, end: str) -> list[dict]:

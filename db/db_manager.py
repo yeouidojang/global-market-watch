@@ -822,6 +822,47 @@ class DBManager:
         conn.close()
         return df
 
+    # ─────────────────────────────────────────
+    #  market_holidays
+    # ─────────────────────────────────────────
+    def upsert_market_holidays(self, records: list[dict]) -> int:
+        """market_holidays upsert. records: [{date, market_key, is_holiday, reason}]"""
+        if not records:
+            return 0
+        conn = self._connect()
+        n = 0
+        try:
+            for r in records:
+                conn.execute("""
+                    INSERT INTO market_holidays (date, market_key, is_holiday, reason)
+                    VALUES (:date, :market_key, :is_holiday, :reason)
+                    ON CONFLICT(date, market_key) DO UPDATE SET
+                        is_holiday = excluded.is_holiday,
+                        reason     = excluded.reason
+                """, {
+                    "date":       r["date"],
+                    "market_key": r["market_key"],
+                    "is_holiday": 1 if r.get("is_holiday") else 0,
+                    "reason":     r.get("reason"),
+                })
+                n += 1
+            conn.commit()
+        finally:
+            conn.close()
+        return n
+
+    def is_market_holiday(self, date: str, market_key: str) -> bool | None:
+        """DB에 저장된 휴장 여부 반환. 데이터 없으면 None."""
+        conn = self._connect()
+        row = conn.execute(
+            "SELECT is_holiday FROM market_holidays WHERE date=? AND market_key=?",
+            (date, market_key),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        return bool(row[0])
+
     def get_market_flow(self, date: str) -> dict:
         """
         stocks_daily의 investor_flow 레코드에서 시장 전체 외인/기관 합계 반환.

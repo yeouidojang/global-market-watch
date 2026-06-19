@@ -7,9 +7,9 @@ Claude API로 시황 브리핑을 생성해 Slack으로 발송하는 자동화 �
 ---
 
 ## 환경 정보
-- Python 실행: `C:/Users/LEESH/.conda/envs/meritzquant/python.exe`
-- 작업 디렉토리: `C:/mquant/global_market_watch`
-- 환경 변수: `C:/mquant/.env` (LSEG, Anthropic, Slack 키 포함)
+- Python 실행: `/usr/bin/python3` (Linux 서버)
+- 작업 디렉토리: `/home/quant/global_market_watch`
+- 환경 변수: `/home/quant/.env` → 프로젝트 루트에 심볼릭링크(`/home/quant/global_market_watch/.env`)
 - DB 경로: `db/market_watch.db` (SQLite, 자동 생성)
 
 ---
@@ -89,7 +89,7 @@ run_session.py
 
 | 세션 | 트리거 | 대상 |
 |------|--------|------|
-| asia | 15:40 | KOSPI·KOSDAQ·Nikkei·TOPIX·CSI300·HSI |
+| asia | 16:10 | KOSPI·KOSDAQ·Nikkei·TOPIX·CSI300·HSI |
 | europe | 01:40 | DAX·FTSE·CAC40·EuroStoxx50 |
 | us | 06:10 | SPX·NDX·DJIA·Russell2000 + 글로벌 통합 브리핑 |
 | macro | 세션과 함께 | FX·금리·원자재·VIX (항상 전체) |
@@ -165,4 +165,4 @@ send_text("테스트 메시지")
 ## 주의 사항
 - `.env` 파일은 절대 git commit 하지 않는다 (`.gitignore` 적용됨).
 - LSEG SDK는 회사 프록시 우회 패치(`httpx`, `urllib3`)가 각 스크립트 상단에 포함됨.
-- `run_session.py` 는 항상 `C:/mquant/global_market_watch` 를 기준 디렉토리로 실행.
+- `run_session.py` 는 항상 `/home/quant/global_market_watch` 를 기준 디렉토리로 실행.
