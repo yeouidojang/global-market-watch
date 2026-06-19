@@ -1206,7 +1206,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
 #  시총 필터: min_mktcap_b ($B) 이상 종목만 (소형주 제외)
 # ================================================================== #
 
-SPX_CSV_PATH = Path("C:/mquant/spx_constituents_prices_2026-02-12.csv")
+SPX_CSV_PATH = Path(os.environ.get("SPX_CSV_PATH", BASE_DIR / "data" / "spx_constituents_prices.csv"))
 EPS_CACHE_DAYS = 7
 
 # LSEG RIC suffix 제거 + 특수 케이스 처리

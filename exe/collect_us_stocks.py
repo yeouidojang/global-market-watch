@@ -1,7 +1,7 @@
 """
 SPX 구성종목 OHLCV 일별 수집 (yfinance)
 
-티커 소스: C:/mquant/spx_constituents_prices_2026-02-12.csv (RIC 헤더 → yfinance 변환)
+티커 소스: SPX_CSV_PATH 환경변수 또는 data/spx_constituents_prices.csv (RIC 헤더 → yfinance 변환)
 저장 대상: DB us_stocks_daily 테이블
 
 사용법:
@@ -10,20 +10,23 @@ SPX 구성종목 OHLCV 일별 수집 (yfinance)
     python exe/collect_us_stocks.py --start 2026-06-01 --end 2026-06-19
 """
 
+import os
 import sys
 import argparse
 import warnings
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 from db.db_manager import DBManager
 
-# S&P500 구성종목 CSV (RIC 컬럼 헤더 기반)
-SPX_CSV_PATH = Path("C:/mquant/spx_constituents_prices_2026-02-12.csv")
+# S&P500 구성종목 CSV — 환경변수 SPX_CSV_PATH 우선, 없으면 프로젝트 내 data/ 폴더
+SPX_CSV_PATH = Path(os.environ.get("SPX_CSV_PATH", BASE_DIR / "data" / "spx_constituents_prices.csv"))
 
 # RIC suffix 제거 + 특수 케이스 매핑
 _RIC_SPECIALS = {
