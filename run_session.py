@@ -2,10 +2,10 @@
 수동 원샷 실행 — 특정 세션 전체 파이프라인 실행
 
 사용법:
-    python run_session.py --session us
-    python run_session.py --session asia --date 2026-06-09
-    python run_session.py --session us --no-notify   # Slack 발송 생략
-    python run_session.py --session us --no-llm      # 브리핑 생략, 데이터 수집만
+    python run_session.py --session asia
+    python run_session.py --session global --date 2026-06-19
+    python run_session.py --session global --no-notify   # Slack 발송 생략
+    python run_session.py --session global --no-llm      # 브리핑 생략, 데이터 수집만
 """
 
 import sys, io
@@ -444,8 +444,6 @@ def main(argv=None):
     # 플래그 스타일 세션 선택 (예: global-market-watch --global --date 2026-06-18)
     grp = parser.add_mutually_exclusive_group()
     grp.add_argument("--asia",   dest="session_flag", action="store_const", const="asia")
-    grp.add_argument("--europe", dest="session_flag", action="store_const", const="europe")
-    grp.add_argument("--us",     dest="session_flag", action="store_const", const="us")
     grp.add_argument("--global", dest="session_flag", action="store_const", const="global",
                      help="Europe+US 통합 파이프라인 (06:10 스케줄)")
     grp.add_argument("--all",    dest="session_flag", action="store_const", const="all")
