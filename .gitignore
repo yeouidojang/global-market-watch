@@ -1,9 +1,34 @@
+# Python
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# 로그
 *.log
 logs/
+
+# DB — 로컬·서버 각자 보존, git으로 공유 안 함
 db/*.db
+db/*.db-shm
+db/*.db-wal
+*.duckdb
+*.parquet
+
+# 임시 / 디버그 스크립트
 _tmp*
 _inv*
+chk*.py
+
+# 인증 정보 (절대 커밋 금지)
 .env
+lseg-data.config.json
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
