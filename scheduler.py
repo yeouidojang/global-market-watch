@@ -18,7 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR.parent / ".env")
+load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 from apscheduler.schedulers.blocking import BlockingScheduler

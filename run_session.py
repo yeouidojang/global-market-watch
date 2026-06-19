@@ -68,7 +68,7 @@ def _default_date(session: str) -> str:
     return today.strftime("%Y-%m-%d")
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR.parent / ".env")
+load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 
@@ -109,8 +109,34 @@ def run_session(session: str, target_date: str,
     finally:
         lseg_close()
 
-    # Step 2: 경제지표/어닝 캘린더 — 글로벌 통합 파이프라인(06:10)에서만 수집
-    print(f"\n[2/4] 경제지표 캘린더 수집 (skip: {session} — global 파이프라인에서 일괄 수집)")
+    # US 세션: SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)
+    if session == "us":
+        print(f"\n[1/4-spx] SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)")
+        try:
+            from exe.collect_us_stocks import run as _run_us_ohlcv
+            _run_us_ohlcv(target_date, target_date)
+        except Exception as _e:
+            print(f"  [SPX OHLCV 수집 ERROR] {_e}")
+
+    # Step 2: 경제지표/어닝 캘린더 (US 세션 단독 실행 시에도 수집)
+    if session == "us":
+        print(f"\n[2/4] 경제지표 + 어닝 캘린더 수집 (이번주 월요일 ~ 다음주 금요일)")
+        _mon = (pd.Timestamp(target_date) - pd.Timedelta(days=pd.Timestamp(target_date).weekday())).strftime("%Y-%m-%d")
+        _fri = (pd.Timestamp(_mon) + pd.Timedelta(days=11)).strftime("%Y-%m-%d")
+        try:
+            from exe.collect_econ_cal import collect_econ_calendar
+            n = db.upsert_econ_event(collect_econ_calendar(from_date=_mon, to_date=_fri))
+            print(f"  경제지표 upserted: {n}건")
+        except Exception as _e:
+            print(f"  [경제지표 수집 ERROR] {_e}")
+        try:
+            from exe.collect_earnings_cal import collect_earnings_calendar
+            n = db.upsert_earnings_event(collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True))
+            print(f"  어닝 upserted: {n}건")
+        except Exception as _e:
+            print(f"  [어닝 수집 ERROR] {_e}")
+    else:
+        print(f"\n[2/4] 경제지표 캘린더 수집 (skip: {session} — global 파이프라인에서 일괄 수집)")
 
     # Step 3: LLM 브리핑
     if skip_llm:
@@ -256,20 +282,30 @@ def run_global_pipeline(target_date: str,
     finally:
         lseg_close()
 
-    # Step 2: 경제지표 + 어닝 캘린더 (1회)
-    print(f"\n[2/5] 경제지표 + SPX 어닝 캘린더 수집")
+    # SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)
+    print(f"\n[1/5-spx] SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)")
+    try:
+        from exe.collect_us_stocks import run as _run_us_ohlcv
+        _run_us_ohlcv(target_date, target_date)
+    except Exception as _e:
+        print(f"  [SPX OHLCV 수집 ERROR] {_e}")
+
+    # Step 2: 경제지표 + 어닝 캘린더 (이번주 월요일 ~ 다음주 금요일, 1회)
+    print(f"\n[2/5] 경제지표 + SPX 어닝 캘린더 수집 (이번주 월요일 ~ 다음주 금요일)")
+    _mon = (pd.Timestamp(target_date) - pd.Timedelta(days=pd.Timestamp(target_date).weekday())).strftime("%Y-%m-%d")
+    _fri = (pd.Timestamp(_mon) + pd.Timedelta(days=11)).strftime("%Y-%m-%d")
     try:
         from exe.collect_econ_cal import collect_econ_calendar
-        records = collect_econ_calendar(days_ahead=14)
+        records = collect_econ_calendar(from_date=_mon, to_date=_fri)
         n = db.upsert_econ_event(records)
-        print(f"  경제지표 upserted: {n}건")
+        print(f"  경제지표 upserted: {n}건 ({_mon} ~ {_fri})")
     except Exception as _e:
         print(f"  [경제지표 수집 ERROR] {_e}")
     try:
         from exe.collect_earnings_cal import collect_earnings_calendar
-        e_records = collect_earnings_calendar(days_ahead=14, filter_spx=True)
+        e_records = collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True)
         n = db.upsert_earnings_event(e_records)
-        print(f"  어닝 upserted: {n}건")
+        print(f"  어닝 upserted: {n}건 ({_mon} ~ {_fri})")
     except Exception as _e:
         print(f"  [어닝 수집 ERROR] {_e}")
 

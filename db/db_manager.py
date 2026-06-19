@@ -748,6 +748,80 @@ class DBManager:
             ) if tv_sum > 0 else None,
         }
 
+    # ------------------------------------------------------------------ #
+    #  us_stocks_daily
+    # ------------------------------------------------------------------ #
+    def upsert_us_stocks_daily(self, records: list[dict]) -> int:
+        """
+        us_stocks_daily 테이블 upsert.
+
+        Parameters
+        ----------
+        records : list of dict  {date, ticker, open, high, low, close, volume}
+
+        Returns
+        -------
+        int  upsert된 행 수
+        """
+        if not records:
+            return 0
+        records = [
+            {k: (None if isinstance(v, float) and pd.isna(v) else v) for k, v in r.items()}
+            for r in records
+        ]
+        sql = """
+            INSERT INTO us_stocks_daily (date, ticker, open, high, low, close, volume)
+            VALUES (:date, :ticker, :open, :high, :low, :close, :volume)
+            ON CONFLICT(date, ticker) DO UPDATE SET
+                open       = excluded.open,
+                high       = excluded.high,
+                low        = excluded.low,
+                close      = excluded.close,
+                volume     = excluded.volume,
+                created_at = datetime('now','localtime')
+        """
+        conn = self._connect()
+        cursor = conn.executemany(sql, records)
+        conn.commit()
+        count = cursor.rowcount
+        conn.close()
+        return count
+
+    def get_us_stocks_daily(self, start_date: str, end_date: str = None,
+                            tickers: list[str] | None = None) -> pd.DataFrame:
+        """
+        us_stocks_daily 조회.
+
+        Parameters
+        ----------
+        start_date : YYYY-MM-DD
+        end_date   : YYYY-MM-DD (기본: start_date와 동일)
+        tickers    : 조회할 ticker 목록 (None이면 전체)
+
+        Returns
+        -------
+        DataFrame  [date, ticker, open, high, low, close, volume]
+        """
+        end = end_date or start_date
+        params: dict = {"start": start_date, "end": end}
+        ticker_clause = ""
+        if tickers:
+            placeholders = ",".join(f":t{i}" for i in range(len(tickers)))
+            ticker_clause = f"AND ticker IN ({placeholders})"
+            for i, t in enumerate(tickers):
+                params[f"t{i}"] = t
+        sql = f"""
+            SELECT date, ticker, open, high, low, close, volume
+            FROM us_stocks_daily
+            WHERE date BETWEEN :start AND :end
+            {ticker_clause}
+            ORDER BY date, ticker
+        """
+        conn = self._connect()
+        df = pd.read_sql_query(sql, conn, params=params)
+        conn.close()
+        return df
+
     def get_market_flow(self, date: str) -> dict:
         """
         stocks_daily의 investor_flow 레코드에서 시장 전체 외인/기관 합계 반환.

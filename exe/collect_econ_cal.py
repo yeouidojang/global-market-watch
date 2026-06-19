@@ -24,7 +24,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR.parent / ".env")
+load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 import requests
@@ -42,10 +42,12 @@ FRED_SERIES = {
     "PCEPILFE":    {"name": "Core PCE",        "freq": "M", "importance": "high",   "release_time_et": "08:30"},
     "PAYEMS":      {"name": "NFP",             "freq": "M", "importance": "high",   "release_time_et": "08:30"},
     "UNRATE":      {"name": "Unemployment",    "freq": "M", "importance": "high",   "release_time_et": "08:30"},
+    "ICSA":        {"name": "Initial Claims",  "freq": "W", "importance": "medium", "release_time_et": "08:30"},
     "JTSJOL":      {"name": "JOLTS",           "freq": "M", "importance": "medium", "release_time_et": "10:00"},
     "RETAILSMNSA": {"name": "Retail Sales",    "freq": "M", "importance": "medium", "release_time_et": "08:30"},
     "INDPRO":      {"name": "Industrial Prod", "freq": "M", "importance": "medium", "release_time_et": "09:15"},
     "HOUST":       {"name": "Housing Starts",  "freq": "M", "importance": "medium", "release_time_et": "08:30"},
+    "DGORDER":     {"name": "Durable Goods",   "freq": "M", "importance": "medium", "release_time_et": "08:30"},
     "GDP":         {"name": "GDP QoQ",         "freq": "Q", "importance": "high",   "release_time_et": "08:30"},
     "FEDFUNDS":    {"name": "Fed Funds Rate",  "freq": "M", "importance": "high",   "release_time_et": None},
 }
@@ -60,6 +62,9 @@ def _format_period(obs_date: str, freq: str) -> str:
     elif freq == "Q":
         q = (dt.month - 1) // 3 + 1
         return f"{dt.year}Q{q}"
+    elif freq == "W":
+        week_end = dt + pd.Timedelta(days=6)
+        return f"{dt.strftime('%m/%d')}주"
     return obs_date[:7]
 
 
@@ -69,6 +74,8 @@ def _advance_date(obs_date: str, freq: str) -> str:
         return (dt + pd.DateOffset(months=1)).strftime("%Y-%m-%d")
     elif freq == "Q":
         return (dt + pd.DateOffset(months=3)).strftime("%Y-%m-%d")
+    elif freq == "W":
+        return (dt + pd.Timedelta(days=7)).strftime("%Y-%m-%d")
     return (dt + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
 
 
@@ -107,73 +114,117 @@ def _fred_release_dates(series_id: str, from_date: str, to_date: str) -> list:
         return []
 
 
-def _collect_fred_series(series_id: str, meta: dict, today_str: str, to_date: str) -> list[dict]:
+def _collect_fred_series(series_id: str, meta: dict, from_date: str, to_date: str) -> list[dict]:
+    """from_date ~ to_date 범위에 release date가 속하는 이벤트 수집.
+
+    과거(from_date ≤ release_date ≤ today): actual 포함
+    미래(today < release_date ≤ to_date): actual=None, previous=최신 obs
+    """
     freq       = meta.get("freq", "M")
     importance = meta.get("importance", "medium")
     rel_time   = meta.get("release_time_et")
+    today      = date.today().strftime("%Y-%m-%d")
 
-    back_date  = (pd.Timestamp(today_str) - pd.Timedelta(days=60)).strftime("%Y-%m-%d")
-    all_rds    = _fred_release_dates(series_id, back_date, to_date)
-    obs_list   = _fred_observations(series_id, n=2)
-    latest     = obs_list[0] if obs_list else None
-    prev_obs   = obs_list[1] if len(obs_list) > 1 else None
-    records    = []
+    # release dates: from_date 90일 전부터 to_date까지 (obs ↔ rd 매핑에 충분한 범위)
+    wide_back = (pd.Timestamp(from_date) - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
+    all_rds   = _fred_release_dates(series_id, wide_back, to_date)
+    # weekly는 window 내 obs가 여러 개이므로 넉넉하게
+    n_obs = 16 if freq == "W" else 6
+    obs_list  = _fred_observations(series_id, n=n_obs)   # 최신순 (내림차순)
+    records   = []
+    seen_rds  = set()
 
-    if latest:
-        obs_date     = latest["date"]
-        period       = _format_period(obs_date, freq)
-        actual       = float(latest["value"])
-        previous     = float(prev_obs["value"]) if prev_obs else None
-        past_rds     = [rd for rd in all_rds if rd > obs_date]
-        release_date = past_rds[0] if past_rds else today_str
-        records.append({
-            "event_date": release_date, "event_time": rel_time,
-            "country": "US",            "indicator": meta["name"],
-            "period": period,           "actual": actual,
-            "forecast": None,           "previous": previous,
-            "surprise": None,           "importance": importance,
-            "source_id": series_id,
-        })
+    # ── 발표 완료 (from_date ≤ release_date ≤ today) ─────────────────────
+    for j, obs_row in enumerate(obs_list):
+        obs_val = obs_row.get("value", ".")
+        if obs_val in (".", None):
+            continue
+        obs_date_str = obs_row["date"]
+        actual = float(obs_val)
 
-    future_rds = [rd for rd in all_rds if rd > today_str]
-    for i, rd in enumerate(future_rds[:2]):
+        # 이 obs의 release date = obs_date 직후 최초 release date
+        release_rds = [rd for rd in all_rds if rd > obs_date_str]
+        if not release_rds:
+            continue
+        release_date = release_rds[0]
+        if release_date in seen_rds:
+            continue
+
+        if from_date <= release_date <= today:
+            seen_rds.add(release_date)
+            prev_row = next(
+                (obs_list[k] for k in range(j + 1, len(obs_list))
+                 if obs_list[k].get("value", ".") not in (".", None)),
+                None,
+            )
+            prev_val = float(prev_row["value"]) if prev_row else None
+            records.append({
+                "event_date": release_date, "event_time": rel_time,
+                "country": "US",            "indicator": meta["name"],
+                "period": _format_period(obs_date_str, freq),
+                "actual": actual,           "forecast": None,
+                "previous": prev_val,       "surprise": None,
+                "importance": importance,   "source_id": series_id,
+            })
+
+    # ── 예정 이벤트 (today < release_date ≤ to_date) ─────────────────────
+    future_rds = [rd for rd in all_rds if today < rd <= to_date and rd not in seen_rds]
+    latest = next((o for o in obs_list if o.get("value", ".") not in (".", None)), None)
+
+    for i, rd in enumerate(future_rds):
+        seen_rds.add(rd)
+        prev_val = float(latest["value"]) if latest else None
         if latest:
             nxt = latest["date"]
             for _ in range(i + 1):
                 nxt = _advance_date(nxt, freq)
-            next_period = _format_period(nxt, freq)
+            period = _format_period(nxt, freq)
         else:
-            next_period = None
-        prev_val = float(latest["value"]) if latest else None
+            period = None
         records.append({
-            "event_date": rd,           "event_time": rel_time,
-            "country": "US",            "indicator": meta["name"],
-            "period": next_period,      "actual": None,
-            "forecast": None,           "previous": prev_val,
-            "surprise": None,           "importance": importance,
+            "event_date": rd,  "event_time": rel_time,
+            "country": "US",   "indicator": meta["name"],
+            "period": period,  "actual": None,
+            "forecast": None,  "previous": prev_val,
+            "surprise": None,  "importance": importance,
             "source_id": series_id,
         })
+
     return records
 
 
-def collect_econ_calendar(days_ahead: int = 14, **_kwargs) -> list[dict]:
+def _this_monday_next_friday() -> tuple[str, str]:
+    """이번주 월요일 ~ 다음주 금요일 날짜 반환."""
+    today       = date.today()
+    this_monday = today - timedelta(days=today.weekday())        # 0=월
+    next_friday = this_monday + timedelta(days=11)               # +1주 +4일
+    return this_monday.strftime("%Y-%m-%d"), next_friday.strftime("%Y-%m-%d")
+
+
+def collect_econ_calendar(from_date: str = None, to_date: str = None,
+                          days_ahead: int = None, **_kwargs) -> list[dict]:
     """경제지표 캘린더 수집 (FRED 단독).
 
-    Finnhub economic-calendar는 무료 플랜 미지원(403)으로 제거됨.
-    **_kwargs: 이전 버전의 use_fred 등 파라미터 호환성 유지용.
+    수집 범위: from_date(기본=이번주 월요일) ~ to_date(기본=다음주 금요일).
+    days_ahead 지정 시 to_date = today + days_ahead (구버전 호환).
     """
-    today_str = date.today().strftime("%Y-%m-%d")
-    to_date   = (date.today() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+    if from_date is None:
+        from_date, _ = _this_monday_next_friday()
+    if to_date is None:
+        if days_ahead is not None:
+            to_date = (date.today() + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        else:
+            _, to_date = _this_monday_next_friday()
 
     if not FRED_API_KEY:
         print("  [collect_econ_cal] FRED_API_KEY 없음 — 건너뜀")
         return []
 
-    print(f"  [FRED] {today_str} ~ {to_date} 경제지표 수집 중...")
+    print(f"  [FRED] {from_date} ~ {to_date} 경제지표 수집 중...")
     all_records = []
     for series_id, meta in FRED_SERIES.items():
         print(f"  [FRED] {series_id:15s} {meta['name']}")
-        recs = _collect_fred_series(series_id, meta, today_str, to_date)
+        recs = _collect_fred_series(series_id, meta, from_date, to_date)
         all_records.extend(recs)
     print(f"  [FRED] 수집 완료: {len(all_records)}건")
     return all_records

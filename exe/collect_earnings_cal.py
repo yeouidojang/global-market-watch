@@ -21,7 +21,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR.parent / ".env")
+load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 import pandas as pd
@@ -47,13 +47,21 @@ def _get_finnhub_client():
 
 
 def _load_spx_symbols() -> set[str]:
-    """SPX 구성종목 ticker set. collect_stocks._load_spx_universe() 재사용."""
+    """SPX 구성종목 ticker set. us_stocks_daily DB에서 로드."""
     try:
-        from exe.collect_stocks import _load_spx_universe
-        return set(_load_spx_universe())
+        import sqlite3
+        from pathlib import Path
+        db_path = BASE_DIR / "db" / "market_watch.db"
+        conn = sqlite3.connect(db_path)
+        rows = conn.execute("SELECT DISTINCT ticker FROM us_stocks_daily").fetchall()
+        conn.close()
+        symbols = {r[0] for r in rows if r[0]}
+        if symbols:
+            print(f"  [SPX 유니버스] DB에서 {len(symbols)}개 로드 (us_stocks_daily)")
+            return symbols
     except Exception as e:
-        print(f"  [SPX 유니버스 로딩 실패] {e}")
-        return set()
+        print(f"  [SPX 유니버스 DB 로딩 실패] {e}")
+    return set()
 
 
 def _to_record(row: dict) -> dict:
@@ -83,7 +91,7 @@ def _to_record(row: dict) -> dict:
     }
 
 
-def collect_earnings_calendar(days_ahead: int = 7,
+def collect_earnings_calendar(days_ahead: int = None,
                               from_date: str | None = None,
                               to_date: str | None = None,
                               filter_spx: bool = True) -> list[dict]:
@@ -92,16 +100,21 @@ def collect_earnings_calendar(days_ahead: int = 7,
 
     Parameters
     ----------
-    days_ahead : 오늘로부터 향후 N일 (from/to가 모두 None일 때 사용)
-    from_date  : YYYY-MM-DD
-    to_date    : YYYY-MM-DD
+    days_ahead : 오늘로부터 향후 N일 (from/to 모두 None이고 days_ahead 지정 시 사용)
+    from_date  : YYYY-MM-DD (기본: 이번주 월요일)
+    to_date    : YYYY-MM-DD (기본: 다음주 금요일)
     filter_spx : True면 SPX 구성종목으로 필터링
     """
     today = date.today()
     if from_date is None:
-        from_date = today.strftime("%Y-%m-%d")
+        this_monday = today - timedelta(days=today.weekday())
+        from_date = this_monday.strftime("%Y-%m-%d")
     if to_date is None:
-        to_date = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        if days_ahead is not None:
+            to_date = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        else:
+            this_monday = today - timedelta(days=today.weekday())
+            to_date = (this_monday + timedelta(days=11)).strftime("%Y-%m-%d")
 
     print(f"  [Finnhub] earnings_calendar {from_date} ~ {to_date}")
     client = _get_finnhub_client()

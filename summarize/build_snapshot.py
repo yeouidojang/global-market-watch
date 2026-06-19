@@ -137,7 +137,19 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
 
         try:
             e_df = db.get_upcoming_earnings(week_start.isoformat(), days=span_days)
+            # us_stocks_daily에 저장된 SPX 유니버스로 필터링
             if not e_df.empty:
+                try:
+                    conn = db._connect()
+                    spx_rows = conn.execute(
+                        "SELECT DISTINCT ticker FROM us_stocks_daily"
+                    ).fetchall()
+                    conn.close()
+                    spx_set = {r[0] for r in spx_rows}
+                    if spx_set:
+                        e_df = e_df[e_df["symbol"].isin(spx_set)]
+                except Exception:
+                    pass
                 earnings_upcoming = e_df.to_dict("records")
         except Exception:
             earnings_upcoming = []
@@ -213,48 +225,44 @@ def format_snapshot_text(snapshot: dict) -> str:
             it  = f"기관 {s['inst_net']//100_000_000:+,}억"    if s.get("inst_net")    is not None else "기관 -"
             lines.append(f"  {s['name']:12s}  {chg:>7s}  {fn}  {it}  [{s['signal']}]")
 
-    # 경제지표 (US 전용 — 이번주 + 다음주, 발표 완료 항목 포함)
+    # 경제지표 (US 전용 — 이번주 + 다음주, 마크다운 표)
     if snapshot["econ_upcoming"]:
-        lines.append("\n[주요 경제지표 — 이번주·다음주 (발표 완료 항목 포함)]")
+        lines.append("\n[주요 경제지표 — 이번주·다음주]")
+        lines.append("| 날짜 | 시간(ET) | 중요도 | 지표 | 기간 | 직전치 | 예상치 | 현재치 |")
+        lines.append("|------|----------|--------|------|------|-------:|-------:|-------:|")
         imp_icon = {"high": "★★★", "medium": "★★☆", "low": "★☆☆"}
-        for ev in snapshot["econ_upcoming"]:
-            imp  = imp_icon.get(ev.get("importance", "medium"), "★★☆")
-            time_str = f" {ev['event_time']}ET" if ev.get("event_time") else ""
-            period_str = f" [{ev['period']}]" if ev.get("period") else ""
-            fc   = f"  예상 {ev['forecast']}" if ev.get("forecast") is not None else ""
-            prev = f"  이전 {ev['previous']}" if ev.get("previous") is not None else ""
-            act  = f"  실제 {ev['actual']}" if ev.get("actual") is not None else ""
-            status = "[발표됨] " if ev.get("actual") is not None else ""
+        for ev in sorted(snapshot["econ_upcoming"], key=lambda x: x["event_date"]):
+            imp     = imp_icon.get(ev.get("importance", "medium"), "★★☆")
+            t_str   = ev.get("event_time") or "-"
+            period  = ev.get("period") or "-"
+            prev    = f"{ev['previous']}" if ev.get("previous") is not None else "-"
+            fc      = f"{ev['forecast']}" if ev.get("forecast")  is not None else "-"
+            act     = f"**{ev['actual']}**" if ev.get("actual") is not None else "-"
             lines.append(
-                f"  {ev['event_date']}{time_str}  {ev['country']:3s}  {imp}  {status}"
-                f"{ev['indicator']:20s}{period_str}{fc}{prev}{act}"
+                f"| {ev['event_date']} | {t_str} | {imp} | {ev['indicator']} "
+                f"| {period} | {prev} | {fc} | {act} |"
             )
 
-    # 어닝 캘린더 (US 전용 — 이번주 + 다음주, 발표 완료 종목 포함)
+    # 어닝 캘린더 (US 전용 — 이번주 + 다음주, 마크다운 표)
     earnings = snapshot.get("earnings_upcoming", [])
     if earnings:
-        lines.append("\n[SPX 기업실적 — 이번주·다음주 (발표 완료 종목 포함, Finnhub)]")
+        lines.append("\n[SPX 기업실적 — 이번주·다음주]")
+        lines.append("| 날짜 | 종목 | 장전/후 | 분기 | EPS예상 | EPS실적 | 서프라이즈 |")
+        lines.append("|------|------|---------|------|--------:|--------:|-----------:|")
         hour_label = {"bmo": "장전", "amc": "장후", "dmh": "장중"}
-        by_date: dict[str, list[dict]] = {}
-        for ev in earnings:
-            by_date.setdefault(ev["event_date"], []).append(ev)
-        for d in sorted(by_date.keys()):
-            day_rows = by_date[d]
-            lines.append(f"  {d}  ({len(day_rows)}개)")
-            for ev in day_rows[:8]:
-                hr = hour_label.get((ev.get("hour") or "").lower(), "-")
-                est = ev.get("eps_estimate")
-                act = ev.get("eps_actual")
-                est_str = f"est {est:+.2f}" if est is not None else "est -"
-                if act is not None:
-                    surp = ev.get("surprise_pct")
-                    act_str = f" act {act:+.2f}" + (f" ({surp:+.1f}%)" if surp is not None else "")
-                else:
-                    act_str = ""
-                yq = f"{ev.get('year') or '-'}Q{ev.get('quarter') or '-'}"
-                lines.append(f"    {ev['symbol']:6s}  {hr:4s}  {yq}  {est_str}{act_str}")
-            if len(day_rows) > 8:
-                lines.append(f"    ... +{len(day_rows)-8}건")
+        for ev in sorted(earnings, key=lambda x: (x["event_date"], x.get("hour") or "")):
+            hr   = hour_label.get((ev.get("hour") or "").lower(), "-")
+            yq   = f"{ev.get('year') or '-'}Q{ev.get('quarter') or '-'}"
+            _est = ev.get("eps_estimate")
+            _act = ev.get("eps_actual")
+            _sur = ev.get("surprise_pct")
+            est  = f"{_est:+.2f}" if _est is not None and pd.notna(_est) else "-"
+            act  = f"**{_act:+.2f}**" if _act is not None and pd.notna(_act) else "-"
+            surp_str = f"**{_sur:+.1f}%**" if _sur is not None and pd.notna(_sur) else "-"
+            lines.append(
+                f"| {ev['event_date']} | {ev['symbol']} | {hr} | {yq} "
+                f"| {est} | {act} | {surp_str} |"
+            )
 
     return "\n".join(lines)
 

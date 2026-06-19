@@ -25,9 +25,14 @@ rates:
   - ric: "US2YT=RR"
     name: US_2Y
     source: lseg
-  - ric: "KR3YT=RR"
-    name: KR_3Y
-    source: lseg
+  - name: KR_3Y
+    source: bok
+    stat_code: "817Y002"
+    item_code: "010200000"
+  - name: KR_10Y
+    source: bok
+    stat_code: "817Y002"
+    item_code: "010210000"
   - ric: "JP10YT=RR"
     name: JP_10Y
     source: lseg
