@@ -362,37 +362,38 @@ def run_global_pipeline(target_date: str,
         us_data["prior_briefings"] = prior_briefings
         print(f"  ▸ 이전 브리핑 컨텍스트: {list(prior_briefings.keys())}")
 
-    print(f"  ▸ US 글로벌 통합 브리핑 생성")
+    print(f"  ▸ Global 통합 브리핑 생성")
     us_content = generate_briefing(session="us", target_date=target_date,
-                                   save=True, stocks_data=us_data)
+                                   save=True, stocks_data=us_data,
+                                   save_as="global")
     print(us_content[:300] + "..." if len(us_content) > 300 else us_content)
 
-    # Step 5: Slack 발송 (US 통합 브리핑 1건만)
+    # Step 5: Slack 발송 (Global 통합 브리핑 1건만)
     if skip_notify:
         print(f"\n[5/5] Slack 발송 (skip: --no-notify)")
-        print(f"\n✅ 완료: EUROPE+US 통합 파이프라인 (Slack 미발송)")
+        print(f"\n✅ 완료: GLOBAL 통합 파이프라인 (Slack 미발송)")
         return
 
-    print(f"\n[5/5] Slack + ClickUp 발송 (US 통합 브리핑 1건)")
+    print(f"\n[5/5] Slack + ClickUp 발송 (Global 통합 브리핑 1건)")
     from summarize.notify_slack import send_briefing
-    latest = db.get_latest_briefing("us")
+    latest = db.get_latest_briefing("global")
     if latest:
         txt_path = _archive_briefing_text(
-            session="us",
+            session="global",
             target_date=target_date,
             briefing_id=latest["id"],
             content=latest.get("content", us_content),
         )
         print(f"  [txt 저장] {txt_path}")
-        send_briefing(briefing_id=latest["id"], session="us", date=target_date)
+        send_briefing(briefing_id=latest["id"], session="global", date=target_date)
 
     try:
         from summarize.notify_clickup import send_briefing_to_docs
-        send_briefing_to_docs(content=us_content, session="us", date=target_date)
+        send_briefing_to_docs(content=us_content, session="global", date=target_date)
     except Exception as _cu_e:
         print(f"  [ClickUp 발송 ERROR] {_cu_e}")
 
-    print(f"\n✅ 완료: EUROPE+US 통합 파이프라인")
+    print(f"\n✅ 완료: GLOBAL 통합 파이프라인")
 
 
 

@@ -32,7 +32,7 @@ def _cumulative_adr_wide(close_frames: dict, n_days: int = 20) -> float | None:
         if not series:
             return None
         wide = pd.DataFrame(series).sort_index()
-        chg  = wide.pct_change().tail(n_days).dropna(how="all")
+        chg  = wide.pct_change(fill_method=None).tail(n_days).dropna(how="all")
         if chg.empty:
             return None
         cum_up   = int((chg > 0).sum().sum())
@@ -50,7 +50,7 @@ def _cumulative_adr_long(hist_df: pd.DataFrame, n_days: int = 20) -> float | Non
         wide = (hist_df.pivot_table(index="date", columns="ticker",
                                     values="close", aggfunc="last")
                        .sort_index())
-        chg  = wide.pct_change().tail(n_days).dropna(how="all")
+        chg  = wide.pct_change(fill_method=None).tail(n_days).dropna(how="all")
         if chg.empty:
             return None
         cum_up   = int((chg > 0).sum().sum())
@@ -80,7 +80,7 @@ def _cumulative_adr_db(session: str, category: str, target_date: str,
         wide = (df.pivot_table(index="date", columns="ticker",
                                values="close", aggfunc="last")
                   .sort_index())
-        chg  = wide.pct_change().tail(n_days).dropna(how="all")
+        chg  = wide.pct_change(fill_method=None).tail(n_days).dropna(how="all")
         if chg.empty:
             return None
         cum_up   = int((chg > 0).sum().sum())
@@ -1230,7 +1230,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
         for _bi in range(0, len(all_tks), _eu_mktcap_batch):
             _batch = all_tks[_bi:_bi + _eu_mktcap_batch]
             _success = False
-            for _attempt in range(3):
+            for _attempt in range(4):
                 try:
                     mc_part = ld.get_data(universe=_batch, fields=["TR.CompanyMarketCap"])
                     if mc_part is not None and not mc_part.empty:
@@ -1242,12 +1242,12 @@ def fetch_europe_stocks(target_date: str) -> dict:
                     _success = True
                     break
                 except Exception as _be:
-                    _wait = 2 ** _attempt
+                    _wait = 3 ** _attempt  # 1→3→9→27s
                     print(f"    [europe mktcap LSEG i={_bi} attempt={_attempt+1}] {_be} → retry in {_wait}s")
                     _time.sleep(_wait)
             if not _success:
                 mktcap_failed.extend(_batch)
-            _time.sleep(0.3)
+            _time.sleep(0.5)
 
         if mktcap_failed:
             print(f"    [europe mktcap yf fallback] {len(mktcap_failed)}개 yfinance 보강 중...")

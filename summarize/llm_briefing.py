@@ -677,9 +677,8 @@ def _all_chg_zero(stocks: list) -> bool:
 def _validate_stocks_data(session: str, target_date: str, stocks_data: dict) -> None:
     """Claude API 호출 전 종목 데이터 무결성 검증 (전 세션·전 시장).
 
-    각 시장의 개별주 그룹이 DB에서 비어있거나 등락률이 전부 0/None인
-    (수집 누락·date-fix 실패 등으로 '숫자가 안 나온') 경우 브리핑 생성을
-    중단하고 에러를 발생시킨다. 잘못된 데이터로 LLM 토큰을 낭비하지 않기 위함.
+    이상 감지 시 Slack 경고를 보내고 계속 진행한다 (브리핑은 중단하지 않음).
+    휴장일인 마켓은 데이터가 비어있어도 검증을 스킵한다.
     """
     sd = stocks_data or {}
     errors: list[str] = []
@@ -695,15 +694,23 @@ def _validate_stocks_data(session: str, target_date: str, stocks_data: dict) -> 
                 f"(수집 누락·date-fix 실패 의심)")
 
     if session == "asia":
-        # 한국 (KOSPI + KOSDAQ)
-        kr_major = ((sd.get("major") or [])
-                    + (sd.get("major_kospi") or [])
-                    + (sd.get("major_kosdaq") or []))
-        kr_feat  = ((sd.get("featured") or [])
-                    + (sd.get("featured_kospi") or [])
-                    + (sd.get("featured_kosdaq") or []))
-        _check("한국 주요종목(KOSPI·KOSDAQ)", kr_major)
-        _check("한국 특징주", kr_feat, require_nonempty=False)
+        # 한국 (KOSPI + KOSDAQ) — XKRX 휴장일이면 스킵
+        try:
+            from db.db_manager import DBManager as _DBMKR
+            _kr_holiday = _DBMKR().is_market_holiday(target_date, "kr")
+        except Exception:
+            _kr_holiday = False
+        if _kr_holiday:
+            print(f"[INFO][validation] 한국(KOSPI·KOSDAQ): 휴장일 ({target_date}) → 검증 스킵")
+        else:
+            kr_major = ((sd.get("major") or [])
+                        + (sd.get("major_kospi") or [])
+                        + (sd.get("major_kosdaq") or []))
+            kr_feat  = ((sd.get("featured") or [])
+                        + (sd.get("featured_kospi") or [])
+                        + (sd.get("featured_kosdaq") or []))
+            _check("한국 주요종목(KOSPI·KOSDAQ)", kr_major)
+            _check("한국 특징주", kr_feat, require_nonempty=False)
         # 일본·중국·홍콩 — 휴장일 스킵 또는 전종목 0%는 경고만
         overseas = sd.get("overseas_asia", {})
         for mk, label in (("jp", "일본(Nikkei225)"),
@@ -771,13 +778,19 @@ def _validate_stocks_data(session: str, target_date: str, stocks_data: dict) -> 
 
     if errors:
         detail = " | ".join(errors)
-        raise ValueError(
-            f"[{session} 종목 데이터 검증 실패] {target_date} DB 데이터 비정상 → "
-            f"Claude 브리핑 생성 중단: {detail}")
+        msg = (f"⚠️ *[{session.upper()} 종목 데이터 이상]* {target_date}\n"
+               f"{detail}\n브리핑은 가용 데이터로 계속 생성합니다.")
+        print(f"[WARN][validation] {msg}")
+        try:
+            from summarize.notify_slack import send_text
+            send_text(msg)
+        except Exception:
+            pass
 
 
 def generate_briefing(session: str, target_date: str = None,
-                      save: bool = True, stocks_data: dict = None) -> str:
+                      save: bool = True, stocks_data: dict = None,
+                      save_as: str = None) -> str:
     today = target_date or date.today().strftime("%Y-%m-%d")
 
     # stocks_data 없으면 DB에서 로드 (브리핑 재생성 시 재수집 불필요)
@@ -853,7 +866,7 @@ def generate_briefing(session: str, target_date: str = None,
         db = DBManager()
         row_id = db.save_briefing(
             date=today,
-            session=session,
+            session=save_as or session,
             content=content,
             model=MODEL,
             prompt_tokens=prompt_tokens,

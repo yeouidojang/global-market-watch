@@ -58,6 +58,24 @@ class DBManager:
         conn.executescript(schema)
         conn.commit()
 
+        # briefings UNIQUE(date, session) 마이그레이션
+        # — 기존 DB에 UNIQUE 제약이 없는 경우, 중복 제거 후 unique index 생성
+        idx_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_briefings_date_session_unique'"
+        ).fetchone()
+        if not idx_exists:
+            conn.execute("""
+                DELETE FROM briefings
+                WHERE id NOT IN (
+                    SELECT MAX(id) FROM briefings GROUP BY date, session
+                )
+            """)
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_briefings_date_session_unique "
+                "ON briefings(date, session)"
+            )
+            conn.commit()
+
         # eps_cache JSON → DB 마이그레이션 (최초 1회)
         self._migrate_eps_cache_json(conn)
 
@@ -280,11 +298,20 @@ class DBManager:
         sql = """
             INSERT INTO briefings (date, session, model, prompt_tokens, output_tokens, content)
             VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date, session) DO UPDATE SET
+                content       = excluded.content,
+                model         = excluded.model,
+                prompt_tokens = excluded.prompt_tokens,
+                output_tokens = excluded.output_tokens,
+                notified      = 0,
+                created_at    = datetime('now','localtime')
         """
         conn = self._connect()
         cursor = conn.execute(sql, (date, session, model, prompt_tokens, output_tokens, content))
         conn.commit()
-        row_id = cursor.lastrowid
+        row_id = cursor.lastrowid or conn.execute(
+            "SELECT id FROM briefings WHERE date=? AND session=?", (date, session)
+        ).fetchone()[0]
         conn.close()
         return row_id
 

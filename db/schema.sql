@@ -37,13 +37,14 @@ CREATE TABLE IF NOT EXISTS econ_calendar (
 CREATE TABLE IF NOT EXISTS briefings (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     date        TEXT NOT NULL,          -- YYYY-MM-DD
-    session     TEXT NOT NULL,          -- asia | europe | us
+    session     TEXT NOT NULL,          -- asia | global | europe (context only)
     model       TEXT,
     prompt_tokens   INTEGER,
     output_tokens   INTEGER,
     content     TEXT NOT NULL,
     notified    INTEGER DEFAULT 0,      -- 0: 미발송, 1: Slack 발송
-    created_at  TEXT DEFAULT (datetime('now','localtime'))
+    created_at  TEXT DEFAULT (datetime('now','localtime')),
+    UNIQUE (date, session)
 );
 
 -- 세션별 종목 스크리닝 결과 (Asia 주요종목/특징주, Europe 섹터/종목, US 스크리닝)
