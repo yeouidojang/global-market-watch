@@ -117,7 +117,18 @@ CREATE TABLE IF NOT EXISTS us_stocks_daily (
     PRIMARY KEY (date, ticker)
 );
 
+-- 시장 휴장일 캘린더 (exchange_calendars 기반)
+CREATE TABLE IF NOT EXISTS market_holidays (
+    date        TEXT NOT NULL,   -- YYYY-MM-DD
+    market_key  TEXT NOT NULL,   -- jp | cn | hk | kr
+    is_holiday  INTEGER NOT NULL, -- 1=휴장, 0=개장
+    reason      TEXT,            -- 공휴일명 (exchange_calendars 제공 시)
+    created_at  TEXT DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (date, market_key)
+);
+
 -- 인덱스
+CREATE INDEX IF NOT EXISTS idx_market_holidays_date ON market_holidays(date);
 CREATE INDEX IF NOT EXISTS idx_us_stocks_daily_date   ON us_stocks_daily(date);
 CREATE INDEX IF NOT EXISTS idx_us_stocks_daily_ticker ON us_stocks_daily(ticker);
 CREATE INDEX IF NOT EXISTS idx_market_daily_date   ON market_daily(date);

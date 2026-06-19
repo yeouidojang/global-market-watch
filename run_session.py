@@ -323,18 +323,24 @@ def run_global_pipeline(target_date: str,
         europe_data = fetch_europe_stocks(target_date)
     finally:
         lseg_close()
-    print(f"  Europe — 섹터 {len(europe_data.get('sectors', []))}개  "
-          f"시총상위 {len(europe_data.get('mktcap_top', []))}개  "
-          f"거래대금상위 {len(europe_data.get('tradeval_top', []))}개  "
-          f"급증 {len(europe_data.get('turnover_surge', []))}개")
-    db.upsert_stocks_daily(target_date, "europe", europe_data)
+    if europe_data:
+        print(f"  Europe — 섹터 {len(europe_data.get('sectors', []))}개  "
+              f"시총상위 {len(europe_data.get('mktcap_top', []))}개  "
+              f"거래대금상위 {len(europe_data.get('tradeval_top', []))}개  "
+              f"급증 {len(europe_data.get('turnover_surge', []))}개")
+        db.upsert_stocks_daily(target_date, "europe", europe_data)
+    else:
+        print(f"  Europe — 휴장일 스킵")
 
     us_data = fetch_us_stocks(target_date)
-    print(f"  US     — 섹터ETF {len(us_data.get('sectors', []))}개  "
-          f"시총상위 {len(us_data.get('mktcap_top', []))}개  "
-          f"거래대금상위 {len(us_data.get('tradeval_top', []))}개  "
-          f"급증 {len(us_data.get('turnover_surge', []))}개  "
-          f"EPS변화 {len(us_data.get('eps_revision', []))}개")
+    if us_data:
+        print(f"  US     — 섹터ETF {len(us_data.get('sectors', []))}개  "
+              f"시총상위 {len(us_data.get('mktcap_top', []))}개  "
+              f"거래대금상위 {len(us_data.get('tradeval_top', []))}개  "
+              f"급증 {len(us_data.get('turnover_surge', []))}개  "
+              f"EPS변화 {len(us_data.get('eps_revision', []))}개")
+    else:
+        print(f"  US     — 휴장일 스킵")
     us_data["europe_stocks"] = europe_data
     db.upsert_stocks_daily(target_date, "us", us_data)
 
@@ -460,28 +466,43 @@ def main(argv=None):
 
     target_date = args.date or _default_date(args.session)
 
-    if args.session == "global":
-        run_global_pipeline(
+    try:
+        if args.session == "global":
+            run_global_pipeline(
+                target_date=target_date,
+                skip_llm=args.no_llm,
+                skip_notify=args.no_notify,
+            )
+            return
+
+        if args.session == "all":
+            # 호환 유지: asia 후 global 통합 실행
+            run_session(session="asia", target_date=target_date,
+                        skip_llm=args.no_llm, skip_notify=args.no_notify)
+            run_global_pipeline(target_date=target_date,
+                                skip_llm=args.no_llm, skip_notify=args.no_notify)
+            return
+
+        run_session(
+            session=args.session,
             target_date=target_date,
             skip_llm=args.no_llm,
             skip_notify=args.no_notify,
         )
-        return
 
-    if args.session == "all":
-        # 호환 유지: asia 후 global 통합 실행
-        run_session(session="asia", target_date=target_date,
-                    skip_llm=args.no_llm, skip_notify=args.no_notify)
-        run_global_pipeline(target_date=target_date,
-                            skip_llm=args.no_llm, skip_notify=args.no_notify)
-        return
-
-    run_session(
-        session=args.session,
-        target_date=target_date,
-        skip_llm=args.no_llm,
-        skip_notify=args.no_notify,
-    )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            from summarize.notify_slack import send_text
+            send_text(
+                f"🚨 *Market Watch 오류* [{args.session.upper()}] ({target_date})\n"
+                f"`{type(e).__name__}: {str(e)[:300]}`\n"
+                f"```{tb[-600:]}```"
+            )
+        except Exception:
+            pass
+        raise
 
 
 # 콘솔 스크립트 entry point 별칭

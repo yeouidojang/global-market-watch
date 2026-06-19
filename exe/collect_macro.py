@@ -495,7 +495,7 @@ def collect_macro(target_date: str, cfg: dict, db: DBManager) -> int:
                     "open": None, "high": None, "low": None, "volume": None,
                 })
 
-    # yfinance 항목 (VIX 등)
+    # yfinance 항목 (VIX, DXY 등 — volatility 외 fx/rates/commodities도 포함)
     yf_items = []
     yf_meta  = {}
     for item in cfg.get("volatility", []):
@@ -503,6 +503,12 @@ def collect_macro(target_date: str, cfg: dict, db: DBManager) -> int:
             t = item["ticker"]
             yf_items.append(t)
             yf_meta[t] = {"name": item["name"], "category": "volatility"}
+    for cat, db_cat in cat_map.items():
+        for item in cfg.get(cat, []):
+            if item.get("source") == "yfinance":
+                t = item["ticker"]
+                yf_items.append(t)
+                yf_meta[t] = {"name": item["name"], "category": db_cat}
 
     if yf_items:
         print(f"  [macro yfinance] {yf_items}")

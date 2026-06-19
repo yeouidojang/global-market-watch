@@ -20,6 +20,76 @@ from exe.collect_macro import _get_krx_session, _KRX_UA
 import pykrx.website.comm.webio as _webio
 
 
+def _cumulative_adr_wide(close_frames: dict, n_days: int = 20) -> float | None:
+    """yfinance-style {ticker: DataFrame(Close=...)} → n일 누적 ADR.
+    ADR = Σ(일별 상승 종목수) / Σ(일별 하락 종목수) for last n trading days.
+    """
+    if not close_frames:
+        return None
+    try:
+        series = {t: df["Close"] for t, df in close_frames.items()
+                  if "Close" in df.columns and len(df) >= 2}
+        if not series:
+            return None
+        wide = pd.DataFrame(series).sort_index()
+        chg  = wide.pct_change().tail(n_days).dropna(how="all")
+        if chg.empty:
+            return None
+        cum_up   = int((chg > 0).sum().sum())
+        cum_down = int((chg < 0).sum().sum())
+        return round(cum_up / cum_down, 2) if cum_down > 0 else None
+    except Exception:
+        return None
+
+
+def _cumulative_adr_long(hist_df: pd.DataFrame, n_days: int = 20) -> float | None:
+    """Long-format DataFrame(ticker, date, close) → n일 누적 ADR."""
+    if hist_df is None or hist_df.empty:
+        return None
+    try:
+        wide = (hist_df.pivot_table(index="date", columns="ticker",
+                                    values="close", aggfunc="last")
+                       .sort_index())
+        chg  = wide.pct_change().tail(n_days).dropna(how="all")
+        if chg.empty:
+            return None
+        cum_up   = int((chg > 0).sum().sum())
+        cum_down = int((chg < 0).sum().sum())
+        return round(cum_up / cum_down, 2) if cum_down > 0 else None
+    except Exception:
+        return None
+
+
+def _cumulative_adr_db(session: str, category: str, target_date: str,
+                        n_days: int = 20) -> float | None:
+    """DB market_daily에서 n일 누적 ADR 계산 (한국·해외 공용)."""
+    try:
+        from db.db_manager import DBManager
+        hist_start = (pd.Timestamp(target_date) - pd.Timedelta(days=n_days * 2 + 5)
+                      ).strftime("%Y-%m-%d")
+        conn = DBManager()._connect()
+        rows = conn.execute(
+            "SELECT date, name, close FROM market_daily "
+            "WHERE session=? AND category=? AND date BETWEEN ? AND ? AND close > 0",
+            (session, category, hist_start, target_date),
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return None
+        df   = pd.DataFrame(rows, columns=["date", "ticker", "close"])
+        wide = (df.pivot_table(index="date", columns="ticker",
+                               values="close", aggfunc="last")
+                  .sort_index())
+        chg  = wide.pct_change().tail(n_days).dropna(how="all")
+        if chg.empty:
+            return None
+        cum_up   = int((chg > 0).sum().sum())
+        cum_down = int((chg < 0).sum().sum())
+        return round(cum_up / cum_down, 2) if cum_down > 0 else None
+    except Exception:
+        return None
+
+
 def _patch_webio():
     """pykrx webio를 KRX 인증 세션으로 교체."""
     s = _get_krx_session()
@@ -76,7 +146,61 @@ def fetch_top_stocks(
     try:
         from pykrx import stock
 
-        date_str = target_date.replace("-", "")
+        date_str   = target_date.replace("-", "")
+        hist_start = (pd.Timestamp(target_date) - pd.Timedelta(days=35)).strftime("%Y-%m-%d")
+
+        # ── 0. 과거 OHLCV 저장 (hist_start ~ 전일, DB 미저장 날짜만) ──
+        try:
+            from db.db_manager import DBManager as _DBMH
+            _conn_h = _DBMH()._connect()
+            _stored = {
+                r[0] for r in _conn_h.execute(
+                    "SELECT DISTINCT date FROM market_daily "
+                    "WHERE session='asia' AND category='stock' AND date BETWEEN ? AND ?",
+                    (hist_start, target_date),
+                ).fetchall()
+            }
+            _conn_h.close()
+
+            _biz_days = [
+                d.strftime("%Y-%m-%d")
+                for d in pd.date_range(hist_start, target_date, freq="B")
+                if d.strftime("%Y-%m-%d") not in _stored
+            ]
+            if _biz_days:
+                print(f"  [asia stocks hist] 미저장 {len(_biz_days)}일 pykrx 조회...")
+                _hist_recs: list[dict] = []
+                for _d in _biz_days:
+                    _d_ymd = _d.replace("-", "")
+                    for _mkt in ("KOSPI", "KOSDAQ"):
+                        try:
+                            _hdf = stock.get_market_ohlcv_by_ticker(_d_ymd, market=_mkt)
+                            if _hdf.empty:
+                                continue
+                            _hdf.index.name = "ticker"
+                            _hdf = _hdf.reset_index().rename(columns={
+                                "종가": "close", "시가": "open",
+                                "고가": "high",  "저가": "low", "거래량": "volume",
+                            })
+                            for _, _row in _hdf.iterrows():
+                                _c = _row.get("close")
+                                if pd.notna(_c) and _c > 0:
+                                    _hist_recs.append({
+                                        "date": _d, "session": "asia", "category": "stock",
+                                        "name":   str(_row["ticker"]),
+                                        "close":  float(_c),
+                                        "open":   float(_row["open"])   if pd.notna(_row.get("open"))   else None,
+                                        "high":   float(_row["high"])   if pd.notna(_row.get("high"))   else None,
+                                        "low":    float(_row["low"])    if pd.notna(_row.get("low"))    else None,
+                                        "volume": float(_row["volume"]) if pd.notna(_row.get("volume")) else None,
+                                    })
+                        except Exception as _he:
+                            print(f"    [hist {_d} {_mkt} ERROR] {_he}")
+                if _hist_recs:
+                    _n_h = _DBMH().upsert_market_daily(_hist_recs)
+                    print(f"  [asia stocks hist] 저장: {_n_h}건 ({len(_biz_days)}일)")
+        except Exception as _he:
+            print(f"  [asia stocks hist ERROR] {_he}")
 
         # ── 1. OHLCV (등락률·거래대금 포함) ──────────────────────────
         dfs = []
@@ -117,25 +241,31 @@ def fetch_top_stocks(
             print(f"  [asia stocks market_daily ERROR] {_e}")
 
         # ── 시장 폭 헬퍼 ─────────────────────────────────────────────
-        def _compute_breadth(df_market: pd.DataFrame) -> dict:
+        def _compute_breadth(df_market: pd.DataFrame, market_filter: str | None = None) -> dict:
             v = df_market[df_market["close"] > 0]
             up    = int((v["chg_pct"] > 0).sum())
             down  = int((v["chg_pct"] < 0).sum())
             flat  = int((v["chg_pct"] == 0).sum())
             total = up + down + flat
             tv    = float(v["trade_val"].sum())
+            # 20일 누적 ADR: DB market_daily(session=asia, category=stock) 활용
+            # market_filter(KOSPI/KOSDAQ) 분리는 DB에 market 컬럼 없으므로 전체만 지원
+            adr_20 = (_cumulative_adr_db("asia", "stock", target_date)
+                      if market_filter is None else None)
+            if adr_20 is None:
+                adr_20 = round(up / down, 2) if down > 0 else None
             return {
                 "up": up, "down": down, "flat": flat, "total": total,
                 "up_pct":       round(up / total * 100, 1) if total > 0 else None,
-                "adr":          round(up / down, 2)         if down > 0 else None,
+                "adr":          adr_20,
                 "weighted_chg": round((v["chg_pct"] * v["trade_val"]).sum() / tv, 2)
                                 if tv > 0 else None,
             }
 
         valid = ohlcv[ohlcv["close"] > 0].copy()
-        breadth        = _compute_breadth(valid)
-        breadth_kospi  = _compute_breadth(valid[valid["market"] == "KOSPI"])
-        breadth_kosdaq = _compute_breadth(valid[valid["market"] == "KOSDAQ"])
+        breadth        = _compute_breadth(valid)                                     # 전체: 20일 DB ADR
+        breadth_kospi  = _compute_breadth(valid[valid["market"] == "KOSPI"],  "KOSPI")   # 당일 ADR
+        breadth_kosdaq = _compute_breadth(valid[valid["market"] == "KOSDAQ"], "KOSDAQ")  # 당일 ADR
 
         # ── 1b. 전주/전월 종가 조회 (1W/1M 수익률 계산용) ───────────
         def _fetch_prev_close(back_range: tuple) -> dict[str, float]:
@@ -468,12 +598,41 @@ def fetch_top_stocks(
 
 ASIA_OVERSEAS_MARKETS = [
     # min_tv: 현지통화 기준 거래대금 하한 (P5~P10, 노이즈 제거)
-    {"key": "jp", "name": "Nikkei225", "chain": "0#.N225",   "currency": "JPY", "min_tv": 1_500_000_000},  # 15억엔
-    {"key": "cn", "name": "CSI300",    "chain": "0#.CSI300",  "currency": "CNY", "min_tv":   200_000_000},  # 2억위안
-    {"key": "hk", "name": "HSI",       "chain": "0#.HSI",     "currency": "HKD", "min_tv":   100_000_000},  # 1억HKD
+    {"key": "jp", "name": "Nikkei225", "chain": "0#.N225",   "currency": "JPY", "min_tv": 1_500_000_000, "exchange": "XTKS"},
+    {"key": "cn", "name": "CSI300",    "chain": "0#.CSI300",  "currency": "CNY", "min_tv":   200_000_000, "exchange": "XSHG"},
+    {"key": "hk", "name": "HSI",       "chain": "0#.HSI",     "currency": "HKD", "min_tv":   100_000_000, "exchange": "XHKG"},
 ]
 
 ASIA_LSEG_RETRIES = 3
+
+
+def _fetch_and_store_holiday(market_key: str, exchange_code: str, target_date: str) -> bool:
+    """exchange_calendars로 휴장 여부 확인 후 DB 저장. True=휴장, False=개장."""
+    try:
+        import exchange_calendars as ec
+        from db.db_manager import DBManager
+        cal = ec.get_calendar(exchange_code)
+        dt = pd.Timestamp(target_date)
+        is_holiday = not cal.is_session(dt)
+        reason = None
+        if is_holiday:
+            # 공휴일명 조회 (exchange_calendars 제공 시)
+            try:
+                holidays = cal.regular_holidays.holidays()
+                if dt in holidays.index:
+                    reason = str(holidays[dt])
+            except Exception:
+                pass
+        DBManager().upsert_market_holidays([{
+            "date":       target_date,
+            "market_key": market_key,
+            "is_holiday": is_holiday,
+            "reason":     reason,
+        }])
+        return is_holiday
+    except Exception as e:
+        print(f"    [{market_key} holiday check ERROR] {e}")
+        return False
 ASIA_LSEG_RETRY_BASE_SECS = 1
 ASIA_LSEG_HIST_BATCH_SIZE = 100
 
@@ -741,10 +900,13 @@ def _fetch_asia_market(chain: str, target_date: str,
     down = int((valid["chg_pct"] < 0).sum())
     flat = int((valid["chg_pct"] == 0).sum())
     tot  = up + down + flat
+    adr_20 = _cumulative_adr_long(hist) if hist is not None and not hist.empty else None
+    if adr_20 is None:
+        adr_20 = round(up / down, 2) if down > 0 else None
     breadth = {
         "up": up, "down": down, "flat": flat, "total": tot,
         "up_pct": round(up / tot * 100, 1) if tot > 0 else None,
-        "adr":    round(up / down, 2)      if down > 0 else None,
+        "adr":    adr_20,
     }
 
     # ── 4. major: 시총순위 + 거래대금순위 합산 ─────────────────────
@@ -851,6 +1013,17 @@ def fetch_asia_overseas_stocks(target_date: str,
     """
     result: dict = {}
     for mkt in ASIA_OVERSEAS_MARKETS:
+        # 휴장일 체크 (DB 캐시 → exchange_calendars 조회 후 저장)
+        from db.db_manager import DBManager as _DBMH
+        cached = _DBMH().is_market_holiday(target_date, mkt["key"])
+        if cached is None:
+            is_holiday = _fetch_and_store_holiday(mkt["key"], mkt["exchange"], target_date)
+        else:
+            is_holiday = cached
+        if is_holiday:
+            print(f"  [asia overseas] {mkt['name']} ({target_date}) 휴장일 → 스킵")
+            continue
+
         print(f"  [asia overseas] {mkt['name']} ({mkt['chain']}) 분석 중...")
         try:
             data = _fetch_asia_market(
@@ -880,6 +1053,7 @@ def fetch_asia_overseas_stocks(target_date: str,
 def fetch_europe_stocks(target_date: str) -> dict:
     """
     유럽 섹터 성과(LSEG) + DAX40·FTSE30·CAC40 구성종목(yfinance) 수집.
+    XETR(Frankfurt) 기준 휴장일이면 빈 dict 반환.
 
     Returns
     -------
@@ -889,6 +1063,17 @@ def fetch_europe_stocks(target_date: str) -> dict:
       "breadth":    {"up", "down", "flat", "total", "up_pct", "adr", "weighted_chg"},
     }
     """
+    # 휴장일 체크 (XETR = Frankfurt, 유럽 대륙 거래소 대표)
+    from db.db_manager import DBManager as _DBMEU
+    _eu_cached = _DBMEU().is_market_holiday(target_date, "eu")
+    if _eu_cached is None:
+        _eu_holiday = _fetch_and_store_holiday("eu", "XETR", target_date)
+    else:
+        _eu_holiday = _eu_cached
+    if _eu_holiday:
+        print(f"  [europe] {target_date} 유럽 휴장일(XETR) → 스킵")
+        return {}
+
     import lseg.data as ld
     import yaml
 
@@ -1085,10 +1270,13 @@ def fetch_europe_stocks(target_date: str) -> dict:
         _down = sum(1 for s in stats.values() if s["chg_pct"] < 0)
         _flat = sum(1 for s in stats.values() if s["chg_pct"] == 0)
         _total = _up + _down + _flat
+        _adr_20 = _cumulative_adr_wide(stock_data)
+        if _adr_20 is None:
+            _adr_20 = round(_up / _down, 2) if _down > 0 else None
         eu_breadth = {
             "up": _up, "down": _down, "flat": _flat, "total": _total,
             "up_pct": round(_up / _total * 100, 1) if _total > 0 else None,
-            "adr":    round(_up / _down, 2)         if _down > 0 else None,
+            "adr":    _adr_20,
             "weighted_chg": None,   # 통화 단위 혼재로 가중평균 생략
         }
     else:
@@ -1257,18 +1445,24 @@ def _ric_to_yf(ric: str) -> str | None:
 
 
 def _load_spx_universe() -> list[str]:
-    """SPX 구성종목 yfinance ticker 목록 (CSV 헤더 기반)."""
-    if not SPX_CSV_PATH.exists():
-        return []
-    cols = pd.read_csv(SPX_CSV_PATH, nrows=0).columns.tolist()
-    tickers = []
-    for c in cols:
-        if c.lower() == "date":
-            continue
-        yf_t = _ric_to_yf(c)
-        if yf_t:
-            tickers.append(yf_t)
-    return tickers
+    """SPX 구성종목 yfinance ticker 목록.
+
+    us_stocks_daily DB 우선 → 없으면 collect_us_stocks.load_spx_tickers() 폴백.
+    """
+    try:
+        from db.db_manager import DBManager
+        conn = DBManager()._connect()
+        rows = conn.execute(
+            "SELECT DISTINCT ticker FROM us_stocks_daily ORDER BY ticker"
+        ).fetchall()
+        conn.close()
+        tickers = [r[0] for r in rows]
+        if tickers:
+            return tickers
+    except Exception:
+        pass
+    from exe.collect_us_stocks import load_spx_tickers
+    return load_spx_tickers()
 
 
 def _yf_multiday(tickers: list[str], start: str, end: str) -> dict[str, pd.DataFrame]:
@@ -1466,6 +1660,17 @@ def fetch_us_stocks(
       "eps_revision":  [EPS 추정치 변화],
     }
     """
+    # 휴장일 체크 (XNYS = NYSE)
+    from db.db_manager import DBManager as _DBMUS
+    _us_cached = _DBMUS().is_market_holiday(target_date, "us")
+    if _us_cached is None:
+        _us_holiday = _fetch_and_store_holiday("us", "XNYS", target_date)
+    else:
+        _us_holiday = _us_cached
+    if _us_holiday:
+        print(f"  [us] {target_date} 미국 휴장일(XNYS) → 스킵")
+        return {}
+
     import yfinance as yf
     import yaml
 
@@ -1501,9 +1706,9 @@ def fetch_us_stocks(
     universe = _load_spx_universe()
     if not universe:
         universe = [s["ticker"] for s in us_cfg.get("top_stocks", [])]
-        print(f"    [us universe] SPX CSV 없음 → config 종목 {len(universe)}개 사용")
+        print(f"    [us universe] SPX 유니버스 없음 → config 종목 {len(universe)}개 사용")
     else:
-        print(f"    [us universe] SPX CSV 로드: {len(universe)}개 종목")
+        print(f"    [us universe] SPX 유니버스 로드: {len(universe)}개 종목")
 
     print(f"    [us 5d download] {len(universe)}개 × 5일 ...")
     stock_data = _yf_multiday(universe, hist_start, today_end)
@@ -1564,16 +1769,20 @@ def fetch_us_stocks(
     print(f"    [us tv_filter] {before_tv - len(stats)}종목 제외 (tv < ${min_tv_usd_m:.0f}M) → 잔여 {len(stats)}종목")
 
     # ── 시장 폭 계산 (SPX) ───────────────────────────────────────────
+    # ADR은 TV 필터 전 전체 유니버스(stock_data)로 계산 → 더 대표적
+    _adr_20_us = _cumulative_adr_wide(stock_data)
     if stats:
         _up   = sum(1 for s in stats.values() if s["chg_pct"] > 0)
         _down = sum(1 for s in stats.values() if s["chg_pct"] < 0)
         _flat = sum(1 for s in stats.values() if s["chg_pct"] == 0)
         _total = _up + _down + _flat
         _dv_sum = sum(s["dollar_vol"] for s in stats.values())
+        if _adr_20_us is None:
+            _adr_20_us = round(_up / _down, 2) if _down > 0 else None
         us_breadth = {
             "up": _up, "down": _down, "flat": _flat, "total": _total,
             "up_pct":       round(_up / _total * 100, 1) if _total > 0 else None,
-            "adr":          round(_up / _down, 2)         if _down > 0 else None,
+            "adr":          _adr_20_us,
             "weighted_chg": round(
                 sum(s["chg_pct"] * s["dollar_vol"] for s in stats.values()) / _dv_sum, 2
             ) if _dv_sum > 0 else None,

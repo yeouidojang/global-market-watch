@@ -22,7 +22,7 @@ import anthropic
 from summarize.build_snapshot import build_snapshot, format_snapshot_text
 from db.db_manager import DBManager
 
-MODEL = "claude-opus-4-5"
+MODEL = "claude-opus-4-8"
 
 SESSION_CONTEXT = {
     "asia":   "한국·일본·중국 중심 아시아 시장 마감 직후 브리핑입니다.",
@@ -186,7 +186,7 @@ def _fmt_stocks_asia(stocks_data: dict) -> str:
                 f"| {lbl} | {b.get('up',0)}/{b.get('total',0)} | {up_pct} | {adr} | {wch} |")
     if brd_rows:
         lines.append("\n## [Sub] 시장 폭 — 일본·중국·홍콩")
-        lines.append("| 시장 | 상승/전체 | 상승% | ADR | 거래대금가중등락 |")
+        lines.append("| 시장 | 상승/전체 | 상승% | ADR(20일) | 거래대금가중등락 |")
         lines.append("|------|:---------:|------:|----:|----------------:|")
         lines.extend(brd_rows)
 
@@ -387,7 +387,7 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
                          f"{chg} | {r1w} | {r1m} | {e1w} | {e1m} |  |")
 
     # ════════════════════════════════════════
-    # [Europe Sub]
+    # [Sub] DAX·FTSE·CAC
     # ════════════════════════════════════════
     if europe:
         eu_breadth  = europe.get("breadth", {})
@@ -396,8 +396,8 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
         eu_tradeval = europe.get("tradeval_top", [])
         eu_surge    = europe.get("turnover_surge", [])
 
-        EU_HDR = "| 분류 | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 거래대금(B) | 비고 |"
-        EU_SEP = "|------|--------|------|-----:|----:|----:|----:|-----------:|------|"
+        EU_HDR = "| 분류(지수) | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 거래대금(B) | 비고 |"
+        EU_SEP = "|-----------|--------|------|-----:|----:|----:|----:|-----------:|------|"
 
         def _row_eu(div, s, note=""):
             dv = f"{s['dollar_vol_b']:.2f}" if s.get("dollar_vol_b") else "-"
@@ -405,21 +405,21 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
                     f"{s['close']:.2f} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
                     f"{_r(s.get('ret_1m'))} | {dv} | {note or s.get('signal', '')} |")
 
-        # 시장 폭
+        # 시장 폭 (전체 유럽 통합)
         if eu_breadth:
             up     = eu_breadth.get("up", 0)
             down   = eu_breadth.get("down", 0)
             total  = eu_breadth.get("total", 0)
             up_pct = f"{eu_breadth['up_pct']:.1f}%" if eu_breadth.get("up_pct") is not None else "-"
             adr    = f"{eu_breadth['adr']:.2f}"     if eu_breadth.get("adr")    is not None else "-"
-            lines.append("\n## [Europe] 시장 폭 — DAX·FTSE100·CAC40")
-            lines.append("| 시장 | 상승/전체 | 상승% | ADR |")
+            lines.append("\n## [Sub] 시장 폭 — DAX·FTSE100·CAC40")
+            lines.append("| 시장 | 상승/전체 | 상승% | ADR(20일) |")
             lines.append("|------|:---------:|------:|----:|")
-            lines.append(f"| DAX·FTSE·CAC | {up}/{total} | {up_pct} | {adr} |")
+            lines.append(f"| DAX·FTSE·CAC (합산) | {up}/{total} | {up_pct} | {adr} |")
 
         # STOXX600 섹터 분석
         if eu_sectors:
-            lines.append("\n## [Europe] STOXX600 섹터 분석")
+            lines.append("\n## [Sub] STOXX600 섹터 분석")
             lines.append("| 섹터 | 종가 | 1D% |")
             lines.append("|------|-----:|----:|")
             for s in eu_sectors:
@@ -428,7 +428,7 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
 
         # 시총 상위
         if eu_mktcap:
-            lines.append("\n## [Europe] 시총 상위 — DAX·FTSE100·CAC40")
+            lines.append("\n## [Sub] 시총 상위 — DAX·FTSE100·CAC40")
             lines.append(EU_HDR); lines.append(EU_SEP)
             for s in eu_mktcap:
                 idx = s.get("index") or s.get("market") or "-"
@@ -437,7 +437,7 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
 
         # 거래대금 상위
         if eu_tradeval:
-            lines.append("\n## [Europe] 거래대금 상위 — DAX·FTSE100·CAC40")
+            lines.append("\n## [Sub] 거래대금 상위 — DAX·FTSE100·CAC40")
             lines.append(EU_HDR); lines.append(EU_SEP)
             for s in eu_tradeval:
                 idx = s.get("index") or s.get("market") or "-"
@@ -445,7 +445,7 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
 
         # 급등락+거래대금급증
         if eu_surge:
-            lines.append("\n## [Europe] 급등락+거래대금급증 — DAX·FTSE100·CAC40")
+            lines.append("\n## [Sub] 급등락+거래대금급증 — DAX·FTSE100·CAC40")
             lines.append(EU_HDR); lines.append(EU_SEP)
             for s in eu_surge:
                 idx = s.get("index") or s.get("market") or "-"
@@ -504,12 +504,14 @@ Chg%는 거래대금 전일대비 변화율입니다.
 
 ---
 
-## 시사점 + 다음 세션 주목 포인트
-(일본·중국·홍콩 흐름을 종합해 다음 세션(유럽·미국) 및 내일 한국 개장 시 주목할 포인트를 정리하세요:
-  - **해외 → 한국 전이 테마**: 일본·중국·홍콩에서 강세/약세를 보인 섹터·테마와 KOSPI/KOSDAQ 연관 종목 연결
-    (예: 일본 반도체 장비주 강세 → SK하이닉스·삼성전자·반도체 장비 중소형주 / 중국 전기차 부품 강세 → 2차전지·소재주 / 홍콩 금융 약세 → 은행·증권 비중 조절)
-  - **매크로 경계 포인트**: FX·금리 방향이 KOSPI/KOSDAQ 외국인 수급에 주는 영향
-  - **내일 한국 개장 주목 종목/업종** 3~5개를 bullet로 정리)
+## 글로벌 세션(유럽·미국) 시사점
+(아시아 시장 흐름을 종합해 당일 유럽·미국 세션에서 주목할 포인트를 정리하세요:
+  - **아시아 → 유럽 전이 테마**: 한국·일본에서 강세/약세를 보인 섹터·테마와 유럽 연관 종목 연결
+    (예: 반도체·자동차 방향성 → ASML·LVMH·BMW / 에너지 흐름 → Shell·TotalEnergies)
+  - **아시아 → 미국 전이 테마**: KOSPI/KOSDAQ·Nikkei 흐름과 미국 빅테크·반도체·소재 연관 종목 연결
+    (예: SK하이닉스·삼성전자 방향성 → NVDA·AMAT / 2차전지 강세 → TSLA·리튬 공급망)
+  - **매크로 경계 포인트**: FX(원/달러·엔/달러)·금리 방향이 미국 위험자산 수급에 주는 영향
+  - **오늘 유럽·미국 세션 주목 종목/업종** 3~5개를 bullet로 정리)
 """.format(stocks=stocks_section)
 
     elif session == "europe":
@@ -586,23 +588,26 @@ Chg%는 거래대금 전일대비 변화율입니다.
 
 ## 종목 분석
 
-### [US Main]
+### [US Main] SPX·NDX
 아래 표가 제공됩니다: **[US] 시총+거래대금 상위** / **[US] 급등락+거래대금급증** / **[US] EPS Revision**.
 표 형식: `분류 | Ticker | Name | Sector | 종가 | 1D% | 1W% | 1M% | 규모 | 비고`
 **비고** 컬럼에 상승/하락 원인·시그널·코멘트를 1줄로 작성하세요.
 분석 관점:
-  - 시총 상위 대형주 동향 및 거래 집중도
+  - S&P500 vs Nasdaq 강세 시장·자금 집중 방향
+  - 섹터 ETF 방향성으로 방어주 vs 성장주 vs 에너지 흐름 파악
   - 거래대금 급증 특징주의 테마 (AI·반도체·전기차·바이오·은행·에너지 등)
   - EPS Revision: 상향/하향 배경과 주가 반응 1줄
 
-{'### [Europe Sub] DAX · FTSE100 · CAC40' if has_europe else ''}
-{'아래 섹션별 표가 제공됩니다: **[Europe] 시장 폭** / **[Europe] STOXX600 섹터 분석** / **[Europe] 시총 상위** / **[Europe] 거래대금 상위** / **[Europe] 급등락+거래대금급증**.' if has_europe else ''}
+{'### [Sub] DAX · FTSE100 · CAC40' if has_europe else ''}
+{'아래 섹션별 표가 제공됩니다: **[Sub] 시장 폭** / **[Sub] STOXX600 섹터 분석** / **[Sub] 시총 상위** / **[Sub] 거래대금 상위** / **[Sub] 급등락+거래대금급증**.' if has_europe else ''}
 {'종목표 형식: `분류(지수명) | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 거래대금(B) | 비고`' if has_europe else ''}
+{'지수별(DAX/FTSE100/CAC40)로 분리해 분석하고, 강세/약세 섹터·대형주 방향성을 서술하세요.' if has_europe else ''}
 {'분석 관점:' if has_europe else ''}
 {'  - 시장 폭(상승비율·ADR)으로 DAX/FTSE/CAC 광범위 상승 vs 소수 집중 판단' if has_europe else ''}
 {'  - STOXX600 섹터: 강세/약세 섹터 2~3개 집중 분석' if has_europe else ''}
-{'  - 시총/거래대금 상위 대형주 수급·방향성 구분 (DAX/FTSE/CAC 시장별)' if has_europe else ''}
+{'  - DAX/FTSE/CAC 지수별 시총·거래대금 상위 대형주 수급·방향성 구분' if has_europe else ''}
 {'  - 급등락 특징주 테마 (자동차·럭셔리·에너지·금융·헬스케어 등) 및 미국·아시아 전이 가능성' if has_europe else ''}
+{'  - 유럽 → 미국 전이 테마 명시적 연결' if has_europe else ''}
 
 {{stocks}}
 
@@ -638,10 +643,12 @@ Chg%는 거래대금 전일대비 변화율입니다.
 
 ---
 
-## 시사점 + 다음 세션 주목 포인트
+## 아시아 세션 시사점
 (미국·유럽 흐름을 종합해 내일 아시아 개장 시 주목할 포인트를 정리하세요:
   - **미국 → 아시아 전이 테마**: 미국 반도체·AI·전기차·에너지 섹터와 한국·일본·중국 연관 종목 구체적으로 연결
+    (예: NVDA·AMAT 방향성 → SK하이닉스·삼성전자·반도체 장비 중소형주 / TSLA·리튬 → 2차전지·소재주)
   - **유럽 → 아시아 전이 테마**: ASML·자동차·럭셔리·에너지 등 유럽 섹터와 한국·일본 연관 종목 연결
+    (예: 유럽 자동차 약세 → 현대차·기아·자동차 부품주 / ASML 흐름 → 반도체 장비 섹터)
   - **매크로 경계 포인트**: DXY·VIX·금리 방향이 아시아 외국인 수급에 주는 영향
   - **내일 아시아 세션 주목 종목/업종** 3~5개를 bullet로 정리)
 """.format(stocks=stocks_section)
@@ -697,7 +704,7 @@ def _validate_stocks_data(session: str, target_date: str, stocks_data: dict) -> 
                     + (sd.get("featured_kosdaq") or []))
         _check("한국 주요종목(KOSPI·KOSDAQ)", kr_major)
         _check("한국 특징주", kr_feat, require_nonempty=False)
-        # 일본·중국·홍콩
+        # 일본·중국·홍콩 — 휴장일 스킵 또는 전종목 0%는 경고만
         overseas = sd.get("overseas_asia", {})
         for mk, label in (("jp", "일본(Nikkei225)"),
                           ("cn", "중국(CSI300)"),
@@ -706,13 +713,35 @@ def _validate_stocks_data(session: str, target_date: str, stocks_data: dict) -> 
             stocks: list = []
             for sub in ("major", "mktcap_top", "tradeval_top", "featured"):
                 stocks.extend(mk_data.get(sub, []) or [])
-            _check(label, stocks)
+            # 데이터 없음 = 휴장일 스킵이거나 수집 실패 → DB로 구분
+            if not stocks:
+                try:
+                    from db.db_manager import DBManager as _DBMV
+                    if _DBMV().is_market_holiday(target_date, mk):
+                        print(f"[INFO][validation] {label}: 휴장일 ({target_date}) → 검증 스킵")
+                        continue
+                except Exception:
+                    pass
+                errors.append(f"{label}: 종목 데이터 없음 (수집 누락 의심)")
+            elif _all_chg_zero(stocks):
+                print(f"[WARN][validation] {label}: {len(stocks)}종목 모두 등락률 0/None "
+                      f"(휴장일 또는 date-fix 실패 의심)")
 
     elif session == "europe":
         eu: list = []
         for sub in ("mktcap_top", "tradeval_top", "top_stocks"):
             eu.extend(sd.get(sub, []) or [])
-        _check("유럽 종목(DAX·FTSE·CAC)", eu)
+        if not eu:
+            try:
+                from db.db_manager import DBManager as _DBMEU
+                if _DBMEU().is_market_holiday(target_date, "eu"):
+                    print(f"[INFO][validation] 유럽(DAX·FTSE·CAC): 휴장일 ({target_date}) → 검증 스킵")
+                else:
+                    errors.append("유럽 종목(DAX·FTSE·CAC): 종목 데이터 없음 (수집 누락 의심)")
+            except Exception:
+                errors.append("유럽 종목(DAX·FTSE·CAC): 종목 데이터 없음 (수집 누락 의심)")
+        else:
+            _check("유럽 종목(DAX·FTSE·CAC)", eu)
         _check("유럽 거래대금 급증주", sd.get("turnover_surge") or [],
                require_nonempty=False)
 
@@ -720,10 +749,20 @@ def _validate_stocks_data(session: str, target_date: str, stocks_data: dict) -> 
         us: list = []
         for sub in ("mktcap_top", "tradeval_top", "top_stocks"):
             us.extend(sd.get(sub, []) or [])
-        _check("미국 종목(SPX·NDX)", us)
+        if not us:
+            try:
+                from db.db_manager import DBManager as _DBMUS
+                if _DBMUS().is_market_holiday(target_date, "us"):
+                    print(f"[INFO][validation] 미국(SPX·NDX): 휴장일 ({target_date}) → 검증 스킵")
+                else:
+                    errors.append("미국 종목(SPX·NDX): 종목 데이터 없음 (수집 누락 의심)")
+            except Exception:
+                errors.append("미국 종목(SPX·NDX): 종목 데이터 없음 (수집 누락 의심)")
+        else:
+            _check("미국 종목(SPX·NDX)", us)
         _check("미국 거래대금 급증주", sd.get("turnover_surge") or [],
                require_nonempty=False)
-        # Europe Sub (US 세션 내 유럽 독립 섹션)
+        # Europe Sub (US 세션 내 유럽 독립 섹션) — 유럽 휴장이면 없어도 무방
         eu_sub = sd.get("europe_stocks", {})
         eu_stocks: list = []
         for sub in ("mktcap_top", "tradeval_top", "top_stocks"):
