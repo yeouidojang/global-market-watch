@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR.parent / ".env")
+load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 import pandas as pd
@@ -1206,7 +1206,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
 #  시총 필터: min_mktcap_b ($B) 이상 종목만 (소형주 제외)
 # ================================================================== #
 
-SPX_CSV_PATH = BASE_DIR.parent / "spx_constituents_prices_2026-02-12.csv"
+SPX_CSV_PATH = Path("C:/mquant/spx_constituents_prices_2026-02-12.csv")
 EPS_CACHE_DAYS = 7
 
 # LSEG RIC suffix 제거 + 특수 케이스 처리
@@ -1343,9 +1343,8 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
             state = "Closed"
 
         if state != "Opened":
-            ld.open_session(
-                config_name=str(BASE_DIR.parent / "lseg-data.config.json")
-            )
+            cfg_path = os.getenv("LSEG_CONFIG_PATH", str(Path.home() / "lseg-data.config.json"))
+            ld.open_session(config_name=cfg_path)
             session_opened = True
 
         # ── 시총 배치 수집 (거래대금 상위 100, batch=25 + retry×3 + yfinance fallback) ──

@@ -59,7 +59,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(BASE_DIR.parent / ".env")
+load_dotenv(BASE_DIR / ".env")
 
 sys.path.insert(0, str(BASE_DIR))
 
@@ -80,9 +80,8 @@ def load_yaml(name: str) -> dict:
 
 
 def lseg_open():
-    ld.open_session(
-        config_name=str(BASE_DIR.parent / "lseg-data.config.json")
-    )
+    cfg_path = os.getenv("LSEG_CONFIG_PATH", str(Path.home() / "lseg-data.config.json"))
+    ld.open_session(config_name=cfg_path)
 
 
 def lseg_close():
@@ -212,7 +211,7 @@ def _coalesce(row, *fields):
 def fetch_lseg_close(rics: list[str], target_date: str) -> dict[str, list[dict]]:
     """
     target_date 기준 최근 7일 OHLCV를 LSEG get_history로 수집.
-    - close: TRDPRC_1 → BID 순으로 폴백 (FX·금리·금 지원)
+    - close: YLDTOMAT(금리) → TRDPRC_1 → BID 순으로 폴백 (FX·금리·금 지원)
     반환: {ric: [{date, close, open, high, low, volume}, ...]}  ← 다중 날짜
     """
     result = {}
@@ -220,7 +219,7 @@ def fetch_lseg_close(rics: list[str], target_date: str) -> dict[str, list[dict]]
     try:
         df = ld.get_history(
             universe=rics,
-            fields=["TRDPRC_1", "OPEN_PRC", "HIGH_1", "LOW_1", "ACVOL_UNS", "BID", "ASK"],
+            fields=["YLDTOMAT", "TRDPRC_1", "OPEN_PRC", "HIGH_1", "LOW_1", "ACVOL_UNS", "BID", "ASK"],
             start=start,
             end=target_date,
         )
@@ -234,7 +233,7 @@ def fetch_lseg_close(rics: list[str], target_date: str) -> dict[str, list[dict]]
     def extract_row(r, actual_date):
         return {
             "date":   actual_date,
-            "close":  _coalesce(r, "TRDPRC_1", "BID"),
+            "close":  _coalesce(r, "YLDTOMAT", "TRDPRC_1", "BID"),
             "open":   _coalesce(r, "OPEN_PRC", "ASK"),
             "high":   _coalesce(r, "HIGH_1"),
             "low":    _coalesce(r, "LOW_1"),
@@ -412,22 +411,57 @@ def collect_indices(session: str, target_date: str, cfg: dict, db: DBManager) ->
 
 
 # ------------------------------------------------------------------ #
+#  BoK ECOS API — 한국 금리 수집
+# ------------------------------------------------------------------ #
+BOK_API_KEY  = os.getenv("ECOS_API_KEY", "sample")
+BOK_BASE_URL = "https://ecos.bok.or.kr/api/StatisticSearch"
+
+def fetch_bok_rates(stat_code: str, item_code: str,
+                    start_date: str, end_date: str) -> dict[str, float]:
+    """BoK ECOS 일별 금리 수집 → {YYYY-MM-DD: yield} 반환."""
+    start = start_date.replace("-", "")
+    end   = end_date.replace("-", "")
+    url   = f"{BOK_BASE_URL}/{BOK_API_KEY}/json/kr/1/100/{stat_code}/D/{start}/{end}/{item_code}"
+    try:
+        import requests as _req
+        resp = _req.get(url, timeout=15, verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+        rows = data.get("StatisticSearch", {}).get("row", [])
+        result = {}
+        for r in rows:
+            raw = r.get("DATA_VALUE", "")
+            if raw and raw.strip():
+                t = r["TIME"]
+                dt = f"{t[:4]}-{t[4:6]}-{t[6:8]}"
+                result[dt] = float(raw)
+        return result
+    except Exception as e:
+        print(f"  [BoK ECOS ERROR] {e}")
+        return {}
+
+
+# ------------------------------------------------------------------ #
 #  매크로 수집 (FX·금리·원자재·변동성) — 세션 무관, 항상 전체
 # ------------------------------------------------------------------ #
 def collect_macro(target_date: str, cfg: dict, db: DBManager) -> int:
     records = []
 
-    # LSEG 항목
+    # LSEG 항목 (fx, rates 중 source=lseg, commodities)
     lseg_items = []
     lseg_meta  = {}
+    bok_items  = []   # source=bok 인 rate 항목
 
+    cat_map = {"fx": "fx", "rates": "rate", "commodities": "commodity"}
     for cat in ("fx", "rates", "commodities"):
         for item in cfg.get(cat, []):
-            if item.get("source") == "lseg":
+            src = item.get("source", "lseg")
+            if src == "lseg":
                 ric = item["ric"]
                 lseg_items.append(ric)
-                cat_map = {"fx": "fx", "rates": "rate", "commodities": "commodity"}
                 lseg_meta[ric] = {"name": item["name"], "category": cat_map.get(cat, cat)}
+            elif src == "bok" and cat == "rates":
+                bok_items.append(item)
 
     if lseg_items:
         print(f"  [macro LSEG] {lseg_items}")
@@ -445,6 +479,20 @@ def collect_macro(target_date: str, cfg: dict, db: DBManager) -> int:
                     "high":     row.get("high"),
                     "low":      row.get("low"),
                     "volume":   row.get("volume"),
+                })
+
+    # BoK ECOS 항목 (국고채 금리 등)
+    if bok_items:
+        start7 = (pd.Timestamp(target_date) - pd.Timedelta(days=9)).strftime("%Y-%m-%d")
+        for item in bok_items:
+            name = item["name"]
+            print(f"  [macro BoK] {name} ({item['stat_code']}/{item['item_code']})")
+            yields = fetch_bok_rates(item["stat_code"], item["item_code"], start7, target_date)
+            for dt, yld in sorted(yields.items()):
+                records.append({
+                    "date": dt, "session": "macro", "category": "rate",
+                    "name": name, "close": yld,
+                    "open": None, "high": None, "low": None, "volume": None,
                 })
 
     # yfinance 항목 (VIX 등)
