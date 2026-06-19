@@ -77,7 +77,6 @@ europe:
     - {ticker: "BMW.DE",  name: "BMW",              index: "DAX"}
     - {ticker: "BNR.DE",  name: "Brenntag",         index: "DAX"}
     - {ticker: "CON.DE",  name: "Continental",      index: "DAX"}
-    - {ticker: "1COV.DE", name: "Covestro",         index: "DAX"}
     - {ticker: "DHER.DE", name: "Delivery Hero",    index: "DAX"}
     - {ticker: "DHL.DE",  name: "DHL Group",        index: "DAX"}
     - {ticker: "DB1.DE",  name: "Deutsche Boerse",  index: "DAX"}
@@ -96,7 +95,6 @@ europe:
     - {ticker: "MBG.DE",  name: "Mercedes-Benz",    index: "DAX"}
     - {ticker: "MRK.DE",  name: "Merck KGaA",       index: "DAX"}
     - {ticker: "MUV2.DE", name: "Munich Re",        index: "DAX"}
-    - {ticker: "NFZ.DE",  name: "Nucera",           index: "DAX"}
     - {ticker: "P911.DE", name: "Porsche AG",       index: "DAX"}
     - {ticker: "PAH3.DE", name: "Porsche SE",       index: "DAX"}
     - {ticker: "PUM.DE",  name: "Puma",             index: "DAX"}
@@ -135,7 +133,6 @@ europe:
     - {ticker: "HLMA.L",  name: "Halma",            index: "FTSE"}
     - {ticker: "SSE.L",   name: "SSE",              index: "FTSE"}
     - {ticker: "SGE.L",   name: "Sage",             index: "FTSE"}
-    - {ticker: "AHT.L",   name: "Ashtead",          index: "FTSE"}
     - {ticker: "BKG.L",   name: "Berkeley",         index: "FTSE"}
     - {ticker: "INF.L",   name: "Informa",          index: "FTSE"}
     - {ticker: "IHG.L",   name: "IHG",              index: "FTSE"}
@@ -161,7 +158,6 @@ europe:
     - {ticker: "ML.PA",    name: "Michelin",        index: "CAC"}
     - {ticker: "KER.PA",   name: "Kering",          index: "CAC"}
     - {ticker: "LR.PA",    name: "Legrand",         index: "CAC"}
-    - {ticker: "STM.PA",   name: "STMicro",         index: "CAC"}
     - {ticker: "ENGI.PA",  name: "Engie",           index: "CAC"}
     - {ticker: "CAP.PA",   name: "Capgemini",       index: "CAC"}
     - {ticker: "VIV.PA",   name: "Vivendi",         index: "CAC"}
@@ -170,7 +166,6 @@ europe:
     - {ticker: "WLN.PA",   name: "Worldline",       index: "CAC"}
     - {ticker: "EDEN.PA",  name: "Edenred",         index: "CAC"}
     - {ticker: "ACA.PA",   name: "Credit Agricole", index: "CAC"}
-    - {ticker: "SG.PA",    name: "Soc Generale",    index: "CAC"}
     - {ticker: "SW.PA",    name: "Sodexo",          index: "CAC"}
     - {ticker: "URW.PA",   name: "Unibail",         index: "CAC"}
     - {ticker: "PUB.PA",   name: "Publicis",        index: "CAC"}
@@ -179,7 +174,8 @@ europe:
     - {ticker: "HO.PA",    name: "Thales",          index: "CAC"}
     - {ticker: "TEP.PA",   name: "Teleperformance", index: "CAC"}
     - {ticker: "ERF.PA",   name: "Eurofins",        index: "CAC"}
-    - {ticker: "SOLB.PA",  name: "Solvay",          index: "CAC"}
+    - {ticker: "STMPA.PA", name: "STMicro",         index: "CAC"}
+    - {ticker: "SOLV.BR",  name: "Solvay",           index: "CAC"}
 
 us:
   indices:
