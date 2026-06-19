@@ -97,9 +97,18 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
             continue
 
         cur_date, cur_val   = vals[0]
-        _, prev_val         = vals[1]  if len(vals) > 1  else (None, None)
-        _, val_1w           = vals[5]  if len(vals) > 5  else (None, None)
-        _, val_1m           = vals[21] if len(vals) > 21 else (None, None)
+
+        def _gated(idx, max_gap_days):
+            """vals[idx]의 날짜가 cur_date와 max_gap_days 이상 차이나면 None 반환."""
+            if len(vals) <= idx:
+                return None
+            d, v = vals[idx]
+            gap = abs((pd.Timestamp(cur_date) - pd.Timestamp(d)).days)
+            return v if gap <= max_gap_days else None
+
+        prev_val = _gated(1, 5)    # 1D: 최대 5 캘린더일 허용 (주말·공휴일 감안)
+        val_1w   = _gated(5, 14)   # 1W: 최대 14일
+        val_1m   = _gated(21, 40)  # 1M: 최대 40일
 
         chg    = compute_chg_pct(cur_val, prev_val)
         chg_1w = compute_chg_pct(cur_val, val_1w)
