@@ -18,8 +18,9 @@ jobs:
             set -e
             cd ~/global_market_watch
 
-            echo "=== git pull ==="
-            git pull origin main
+            echo "=== git sync ==="
+            git fetch origin
+            git reset --hard origin/main
 
             echo "=== pip install (변경 시) ==="
             .venv/bin/pip install -q -r requirements.txt
