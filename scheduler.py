@@ -103,17 +103,17 @@ def main():
 
     scheduler = BlockingScheduler(timezone=TIMEZONE)
 
-    # 아시아 마감: 16:10 KST
+    # 아시아 마감: 월~금 16:10 KST (KOSPI/KOSDAQ 거래일 기준)
     scheduler.add_job(
-        _run_asia, CronTrigger(hour=16, minute=10, timezone=TIMEZONE),
+        _run_asia, CronTrigger(hour=16, minute=10, day_of_week="mon-fri", timezone=TIMEZONE),
         id="asia_close",
         name="아시아 시장 마감",
         misfire_grace_time=300,
     )
 
-    # 유럽+미국 통합: 06:10 KST (단일 파이프라인 → Slack 1건)
+    # 유럽+미국 통합: 화~토 06:10 KST (미국 시장 월~금 마감 다음 날 아침)
     scheduler.add_job(
-        _run_global, CronTrigger(hour=6, minute=10, timezone=TIMEZONE),
+        _run_global, CronTrigger(hour=6, minute=10, day_of_week="tue-sat", timezone=TIMEZONE),
         id="global_close",
         name="유럽+미국 통합 파이프라인",
         misfire_grace_time=600,
@@ -122,7 +122,7 @@ def main():
     log.info("=" * 55)
     log.info("  Global Market Watch Scheduler 시작")
     log.info(f"  Timezone: {TIMEZONE}")
-    log.info("  트리거: 16:10(아시아) / 06:10(유럽+미국 통합)")
+    log.info("  트리거: 월~금 16:10 KST(아시아) / 화~토 06:10 KST(유럽+미국 통합)")
     log.info("=" * 55)
 
     try:
