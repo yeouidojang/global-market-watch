@@ -16,7 +16,7 @@ jobs:
           key: ${{ secrets.DO_SSH_PRIVATE_KEY }}
           script: |
             set -e
-            cd ~/global_market_watch
+            cd ~/global-market-watch
 
             echo "=== git sync ==="
             git fetch origin
