@@ -45,11 +45,17 @@ def _prev_weekday_date() -> str:
 def _run_asia():
     today = date.today().strftime("%Y-%m-%d")
     log.info(f"▶ ASIA 세션 시작 ({today})")
+    from run_session import run_session, _OpsTracker
+    ops = _OpsTracker(session="asia", target_date=today)
     try:
-        from run_session import run_session
-        run_session(session="asia", target_date=today)
+        run_session(session="asia", target_date=today, ops=ops)
+        ops.send(ops.format_success())
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
         log.error(f"[asia] 오류: {e}", exc_info=True)
+        ops.err("예외 발생", f"{type(e).__name__}: {str(e)[:150]}")
+        ops.send(ops.format_failure(e, tb))
         try:
             from summarize.notify_slack import send_text
             send_text(f"⚠️ *Market Watch 오류* [ASIA]\n{str(e)[:200]}")
@@ -66,11 +72,17 @@ def _run_global():
     """
     target = _prev_weekday_date()
     log.info(f"▶ GLOBAL(Europe+US) 통합 파이프라인 시작 ({target})")
+    from run_session import run_global_pipeline, _OpsTracker
+    ops = _OpsTracker(session="global", target_date=target)
     try:
-        from run_session import run_global_pipeline
-        run_global_pipeline(target_date=target)
+        run_global_pipeline(target_date=target, ops=ops)
+        ops.send(ops.format_success())
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
         log.error(f"[global] 오류: {e}", exc_info=True)
+        ops.err("예외 발생", f"{type(e).__name__}: {str(e)[:150]}")
+        ops.send(ops.format_failure(e, tb))
         try:
             from summarize.notify_slack import send_text
             send_text(f"⚠️ *Market Watch 오류* [GLOBAL]\n{str(e)[:200]}")

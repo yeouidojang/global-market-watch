@@ -38,6 +38,7 @@ httpx.AsyncClient.__init__ = _pa
 import urllib3; urllib3.disable_warnings()
 
 import sys
+import time
 import argparse
 import pandas as pd
 from datetime import date, timedelta, datetime, timezone
@@ -72,6 +73,63 @@ load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 
+class _OpsTracker:
+    """파이프라인 실행 결과를 수집해 ops 채널 메시지로 포맷."""
+
+    SESSION_ICON = {"asia": "🌏", "global": "🌐", "europe": "🇪🇺", "us": "🇺🇸"}
+
+    def __init__(self, session: str, target_date: str):
+        self.session    = session
+        self.date       = target_date
+        self._t0        = time.time()
+        self._steps: list[tuple[str, str, str]] = []  # (icon, label, detail)
+
+    # ── 단계 기록 ────────────────────────────────────────────
+    def ok(self, label: str, detail: str = ""):
+        self._steps.append(("✅", label, detail))
+
+    def warn(self, label: str, detail: str = ""):
+        self._steps.append(("⚠️", label, detail))
+
+    def err(self, label: str, detail: str = ""):
+        self._steps.append(("❌", label, detail))
+
+    # ── 경과 시간 ─────────────────────────────────────────────
+    def _elapsed(self) -> str:
+        s = int(time.time() - self._t0)
+        m, s = divmod(s, 60)
+        return f"{m}분 {s}초" if m else f"{s}초"
+
+    # ── 메시지 포맷 ──────────────────────────────────────────
+    def _header(self, status: str) -> str:
+        icon = self.SESSION_ICON.get(self.session, "📊")
+        return (f"{status} {icon} *[{self.session.upper()}] "
+                f"{self.date} 파이프라인* ({self._elapsed()})")
+
+    def format_success(self) -> str:
+        lines = [self._header("✅")]
+        for ico, label, detail in self._steps:
+            lines.append(f"  {ico} {label}" + (f"  _({detail})_" if detail else ""))
+        return "\n".join(lines)
+
+    def format_failure(self, exc: Exception, tb: str) -> str:
+        lines = [self._header("❌")]
+        for ico, label, detail in self._steps:
+            lines.append(f"  {ico} {label}" + (f"  _({detail})_" if detail else ""))
+        lines.append(f"\n`{type(exc).__name__}: {str(exc)[:300]}`")
+        tail = tb.strip().splitlines()
+        lines.append("```" + "\n".join(tail[-12:]) + "```")
+        return "\n".join(lines)
+
+    # ── 발송 ─────────────────────────────────────────────────
+    def send(self, text: str):
+        try:
+            from summarize.notify_slack import send_ops
+            send_ops(text)
+        except Exception as _e:
+            print(f"[ops] 발송 실패: {_e}")
+
+
 def _archive_briefing_text(session: str, target_date: str, briefing_id: int, content: str) -> Path:
     """브리핑 원문을 TXT 파일로 보관하고 저장 경로를 반환."""
     out_dir = BASE_DIR / "logs" / "briefings_txt" / session
@@ -82,7 +140,8 @@ def _archive_briefing_text(session: str, target_date: str, briefing_id: int, con
 
 
 def run_session(session: str, target_date: str,
-                skip_llm: bool = False, skip_notify: bool = False):
+                skip_llm: bool = False, skip_notify: bool = False,
+                ops: "_OpsTracker | None" = None):
 
     print(f"\n{'='*55}")
     print(f"  Global Market Watch  |  {session.upper()}  |  {target_date}")
@@ -102,10 +161,14 @@ def run_session(session: str, target_date: str,
     print(f"\n[1/4] 데이터 수집 (session={session})")
     lseg_open()
     try:
-        n = collect_indices(session, target_date, indices_cfg, db)
-        print(f"  지수 upserted: {n}건")
-        n = collect_macro(target_date, macro_cfg, db)
-        print(f"  매크로 upserted: {n}건")
+        n_idx = collect_indices(session, target_date, indices_cfg, db)
+        print(f"  지수 upserted: {n_idx}건")
+        n_mac = collect_macro(target_date, macro_cfg, db)
+        print(f"  매크로 upserted: {n_mac}건")
+        if ops: ops.ok("[1] 데이터 수집", f"지수 {n_idx}건, 매크로 {n_mac}건")
+    except Exception as _e:
+        if ops: ops.err("[1] 데이터 수집", str(_e)[:120])
+        raise
     finally:
         lseg_close()
 
@@ -117,30 +180,34 @@ def run_session(session: str, target_date: str,
             _run_us_ohlcv(target_date, target_date)
         except Exception as _e:
             print(f"  [SPX OHLCV 수집 ERROR] {_e}")
+            if ops: ops.warn("[1-spx] SPX OHLCV", str(_e)[:80])
 
     # Step 2: 경제지표/어닝 캘린더 (US 세션 단독 실행 시에도 수집)
     if session == "us":
         print(f"\n[2/4] 경제지표 + 어닝 캘린더 수집 (이번주 월요일 ~ 다음주 금요일)")
         _mon = (pd.Timestamp(target_date) - pd.Timedelta(days=pd.Timestamp(target_date).weekday())).strftime("%Y-%m-%d")
         _fri = (pd.Timestamp(_mon) + pd.Timedelta(days=11)).strftime("%Y-%m-%d")
+        _n_econ = _n_earn = 0
         try:
             from exe.collect_econ_cal import collect_econ_calendar
-            n = db.upsert_econ_event(collect_econ_calendar(from_date=_mon, to_date=_fri))
-            print(f"  경제지표 upserted: {n}건")
+            _n_econ = db.upsert_econ_event(collect_econ_calendar(from_date=_mon, to_date=_fri))
+            print(f"  경제지표 upserted: {_n_econ}건")
         except Exception as _e:
             print(f"  [경제지표 수집 ERROR] {_e}")
         try:
             from exe.collect_earnings_cal import collect_earnings_calendar
-            n = db.upsert_earnings_event(collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True))
-            print(f"  어닝 upserted: {n}건")
+            _n_earn = db.upsert_earnings_event(collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True))
+            print(f"  어닝 upserted: {_n_earn}건")
         except Exception as _e:
             print(f"  [어닝 수집 ERROR] {_e}")
+        if ops: ops.ok("[2] 경제지표·어닝", f"경제지표 {_n_econ}건, 어닝 {_n_earn}건")
     else:
         print(f"\n[2/4] 경제지표 캘린더 수집 (skip: {session} — global 파이프라인에서 일괄 수집)")
 
     # Step 3: LLM 브리핑
     if skip_llm:
         print(f"\n[3/4] LLM 브리핑 (skip: --no-llm)")
+        if ops: ops.warn("[3] LLM 브리핑", "skip (--no-llm)")
         return
 
     # 한국 세션이면 주요 종목 / 특징주 수집
@@ -149,11 +216,12 @@ def run_session(session: str, target_date: str,
         print(f"\n[3/4-pre] KOSPI/KOSDAQ 종목 수집")
         from exe.collect_stocks import fetch_top_stocks, fetch_asia_overseas_stocks
         stocks_data = fetch_top_stocks(target_date)
-        print(f"  주요종목 {len(stocks_data.get('major', []))}개  "
-              f"특징주 {len(stocks_data.get('featured', []))}개  "
+        _n_major = len(stocks_data.get('major', []))
+        _n_feat  = len(stocks_data.get('featured', []))
+        print(f"  주요종목 {_n_major}개  특징주 {_n_feat}개  "
               f"수급데이터 {len(stocks_data.get('investor_flow', []))}개")
 
-        # 일본 / 중국 / 홍콩 — LSEG 구성종목 분석 (이미 LSEG 세션 열려 있음)
+        # 일본 / 중국 / 홍콩 — LSEG 구성종목 분석
         print(f"\n[3/4-pre2] 일본·중국·홍콩 구성종목 분석 (LSEG)")
         from exe.collect_macro import lseg_open as _lseg_open, lseg_close as _lseg_close
         _lseg_open()
@@ -166,6 +234,7 @@ def run_session(session: str, target_date: str,
             for mk, d in overseas.items():
                 print(f"  {mk.upper()} {d['name']}: major {len(d['major'])} / "
                       f"featured {len(d['featured'])} / sectors {len(d['sectors'])}")
+        if ops: ops.ok("[3-pre] 종목 수집", f"주요 {_n_major}개, 특징 {_n_feat}개")
 
     elif session == "europe":
         print(f"\n[3/4-pre] 유럽 섹터 + 종목 수집")
@@ -180,6 +249,7 @@ def run_session(session: str, target_date: str,
               f"시총상위 {len(stocks_data.get('mktcap_top', []))}개  "
               f"거래대금상위 {len(stocks_data.get('tradeval_top', []))}개  "
               f"급증 {len(stocks_data.get('turnover_surge', []))}개")
+        if ops: ops.ok("[3-pre] 유럽 종목", f"섹터 {len(stocks_data.get('sectors',[]))}개")
 
     elif session == "us":
         print(f"\n[3/4-pre] 미국 섹터ETF + 종목 수집")
@@ -197,6 +267,7 @@ def run_session(session: str, target_date: str,
             print(f"  유럽 종목 데이터 로드: 섹터 {len(e_stocks.get('sectors', []))}개  "
                   f"시총상위 {len(e_stocks.get('mktcap_top', []))}개  "
                   f"급증 {len(e_stocks.get('turnover_surge', []))}개")
+        if ops: ops.ok("[3-pre] US 종목", f"섹터ETF {len(stocks_data.get('sectors',[]))}개")
 
         # US 세션: 당일 asia/europe 브리핑 요약을 DB에서 읽어 추가 컨텍스트로 전달
         prior_briefings = {}
@@ -219,10 +290,17 @@ def run_session(session: str, target_date: str,
     content = generate_briefing(session=session, target_date=target_date, save=True,
                                 stocks_data=stocks_data)
     print(content[:300] + "..." if len(content) > 300 else content)
+    # 토큰 수 DB에서 조회
+    _briefing_row = db.get_latest_briefing(session)
+    if _briefing_row and ops:
+        _pt = _briefing_row.get("prompt_tokens", 0) or 0
+        _ot = _briefing_row.get("output_tokens", 0) or 0
+        ops.ok("[3] LLM 브리핑", f"{_pt:,}+{_ot:,} tokens")
 
     # Step 4: Slack 발송
     if skip_notify:
         print(f"\n[4/4] Slack 발송 (skip: --no-notify)")
+        if ops: ops.warn("[4] Slack", "skip (--no-notify)")
         return
 
     print(f"\n[4/4] Slack + ClickUp 발송")
@@ -238,19 +316,23 @@ def run_session(session: str, target_date: str,
             )
             print(f"  [txt 저장] {txt_path}")
         send_briefing(briefing_id=latest["id"], session=session, date=target_date)
+        if ops: ops.ok("[4] Slack 브리핑 발송", f"id={latest['id']}")
 
     if session != "europe":
         try:
             from summarize.notify_clickup import send_briefing_to_docs
             send_briefing_to_docs(content=content, session=session, date=target_date)
+            if ops: ops.ok("[4] ClickUp 발송")
         except Exception as _cu_e:
             print(f"  [ClickUp 발송 ERROR] {_cu_e}")
+            if ops: ops.warn("[4] ClickUp", str(_cu_e)[:80])
 
     print(f"\n✅ 완료: {session.upper()} 세션 파이프라인")
 
 
 def run_global_pipeline(target_date: str,
-                        skip_llm: bool = False, skip_notify: bool = False):
+                        skip_llm: bool = False, skip_notify: bool = False,
+                        ops: "_OpsTracker | None" = None):
     """06:10 KST 통합 파이프라인 — Europe + US 데이터 수집/브리핑/Slack 단일 실행.
 
     중복 제거: LSEG 세션 1회, 매크로 1회, 경제지표 캘린더 1회.
@@ -273,12 +355,16 @@ def run_global_pipeline(target_date: str,
     print(f"\n[1/5] 데이터 수집 (Europe + US 지수, 매크로)")
     lseg_open()
     try:
-        n_eu = collect_indices("europe", target_date, indices_cfg, db)
+        n_eu    = collect_indices("europe", target_date, indices_cfg, db)
         print(f"  Europe 지수 upserted: {n_eu}건")
-        n_us = collect_indices("us", target_date, indices_cfg, db)
+        n_us    = collect_indices("us", target_date, indices_cfg, db)
         print(f"  US 지수 upserted:     {n_us}건")
         n_macro = collect_macro(target_date, macro_cfg, db)
         print(f"  매크로 upserted:      {n_macro}건")
+        if ops: ops.ok("[1] 데이터 수집", f"EU {n_eu}건, US {n_us}건, 매크로 {n_macro}건")
+    except Exception as _e:
+        if ops: ops.err("[1] 데이터 수집", str(_e)[:120])
+        raise
     finally:
         lseg_close()
 
@@ -289,28 +375,32 @@ def run_global_pipeline(target_date: str,
         _run_us_ohlcv(target_date, target_date)
     except Exception as _e:
         print(f"  [SPX OHLCV 수집 ERROR] {_e}")
+        if ops: ops.warn("[1-spx] SPX OHLCV", str(_e)[:80])
 
     # Step 2: 경제지표 + 어닝 캘린더 (이번주 월요일 ~ 다음주 금요일, 1회)
     print(f"\n[2/5] 경제지표 + SPX 어닝 캘린더 수집 (이번주 월요일 ~ 다음주 금요일)")
     _mon = (pd.Timestamp(target_date) - pd.Timedelta(days=pd.Timestamp(target_date).weekday())).strftime("%Y-%m-%d")
     _fri = (pd.Timestamp(_mon) + pd.Timedelta(days=11)).strftime("%Y-%m-%d")
+    _n_econ = _n_earn = 0
     try:
         from exe.collect_econ_cal import collect_econ_calendar
         records = collect_econ_calendar(from_date=_mon, to_date=_fri)
-        n = db.upsert_econ_event(records)
-        print(f"  경제지표 upserted: {n}건 ({_mon} ~ {_fri})")
+        _n_econ = db.upsert_econ_event(records)
+        print(f"  경제지표 upserted: {_n_econ}건 ({_mon} ~ {_fri})")
     except Exception as _e:
         print(f"  [경제지표 수집 ERROR] {_e}")
     try:
         from exe.collect_earnings_cal import collect_earnings_calendar
         e_records = collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True)
-        n = db.upsert_earnings_event(e_records)
-        print(f"  어닝 upserted: {n}건 ({_mon} ~ {_fri})")
+        _n_earn = db.upsert_earnings_event(e_records)
+        print(f"  어닝 upserted: {_n_earn}건 ({_mon} ~ {_fri})")
     except Exception as _e:
         print(f"  [어닝 수집 ERROR] {_e}")
+    if ops: ops.ok("[2] 경제지표·어닝", f"경제지표 {_n_econ}건, 어닝 {_n_earn}건")
 
     if skip_llm:
         print(f"\n[3-5/5] LLM 브리핑 + Slack (skip: --no-llm)")
+        if ops: ops.warn("[3-5] LLM·Slack", "skip (--no-llm)")
         print(f"\n✅ 완료: EUROPE+US 데이터 수집")
         return
 
@@ -329,8 +419,10 @@ def run_global_pipeline(target_date: str,
               f"거래대금상위 {len(europe_data.get('tradeval_top', []))}개  "
               f"급증 {len(europe_data.get('turnover_surge', []))}개")
         db.upsert_stocks_daily(target_date, "europe", europe_data)
+        if ops: ops.ok("[3] Europe 종목", f"섹터 {len(europe_data.get('sectors',[]))}개")
     else:
         print(f"  Europe — 휴장일 스킵")
+        if ops: ops.warn("[3] Europe 종목", "휴장일 스킵")
 
     us_data = fetch_us_stocks(target_date)
     if us_data:
@@ -339,8 +431,10 @@ def run_global_pipeline(target_date: str,
               f"거래대금상위 {len(us_data.get('tradeval_top', []))}개  "
               f"급증 {len(us_data.get('turnover_surge', []))}개  "
               f"EPS변화 {len(us_data.get('eps_revision', []))}개")
+        if ops: ops.ok("[3] US 종목", f"섹터ETF {len(us_data.get('sectors',[]))}개")
     else:
         print(f"  US     — 휴장일 스킵")
+        if ops: ops.warn("[3] US 종목", "휴장일 스킵")
     us_data["europe_stocks"] = europe_data
     db.upsert_stocks_daily(target_date, "us", us_data)
 
@@ -367,10 +461,16 @@ def run_global_pipeline(target_date: str,
                                    save=True, stocks_data=us_data,
                                    save_as="global")
     print(us_content[:300] + "..." if len(us_content) > 300 else us_content)
+    _briefing_row = db.get_latest_briefing("global")
+    if _briefing_row and ops:
+        _pt = _briefing_row.get("prompt_tokens", 0) or 0
+        _ot = _briefing_row.get("output_tokens", 0) or 0
+        ops.ok("[4] LLM 브리핑", f"{_pt:,}+{_ot:,} tokens")
 
     # Step 5: Slack 발송 (Global 통합 브리핑 1건만)
     if skip_notify:
         print(f"\n[5/5] Slack 발송 (skip: --no-notify)")
+        if ops: ops.warn("[5] Slack", "skip (--no-notify)")
         print(f"\n✅ 완료: GLOBAL 통합 파이프라인 (Slack 미발송)")
         return
 
@@ -386,12 +486,15 @@ def run_global_pipeline(target_date: str,
         )
         print(f"  [txt 저장] {txt_path}")
         send_briefing(briefing_id=latest["id"], session="global", date=target_date)
+        if ops: ops.ok("[5] Slack 브리핑 발송", f"id={latest['id']}")
 
     try:
         from summarize.notify_clickup import send_briefing_to_docs
         send_briefing_to_docs(content=us_content, session="global", date=target_date)
+        if ops: ops.ok("[5] ClickUp 발송")
     except Exception as _cu_e:
         print(f"  [ClickUp 발송 ERROR] {_cu_e}")
+        if ops: ops.warn("[5] ClickUp", str(_cu_e)[:80])
 
     print(f"\n✅ 완료: GLOBAL 통합 파이프라인")
 
@@ -465,33 +568,44 @@ def main(argv=None):
 
     target_date = args.date or _default_date(args.session)
 
+    ops = _OpsTracker(session=args.session, target_date=target_date)
+
     try:
         if args.session == "global":
             run_global_pipeline(
                 target_date=target_date,
                 skip_llm=args.no_llm,
                 skip_notify=args.no_notify,
+                ops=ops,
             )
-            return
-
-        if args.session == "all":
+        elif args.session == "all":
             # 호환 유지: asia 후 global 통합 실행
+            ops_asia   = _OpsTracker(session="asia",   target_date=target_date)
+            ops_global = _OpsTracker(session="global", target_date=target_date)
             run_session(session="asia", target_date=target_date,
-                        skip_llm=args.no_llm, skip_notify=args.no_notify)
+                        skip_llm=args.no_llm, skip_notify=args.no_notify, ops=ops_asia)
+            ops_asia.send(ops_asia.format_success())
             run_global_pipeline(target_date=target_date,
-                                skip_llm=args.no_llm, skip_notify=args.no_notify)
+                                skip_llm=args.no_llm, skip_notify=args.no_notify, ops=ops_global)
+            ops_global.send(ops_global.format_success())
             return
+        else:
+            run_session(
+                session=args.session,
+                target_date=target_date,
+                skip_llm=args.no_llm,
+                skip_notify=args.no_notify,
+                ops=ops,
+            )
 
-        run_session(
-            session=args.session,
-            target_date=target_date,
-            skip_llm=args.no_llm,
-            skip_notify=args.no_notify,
-        )
+        ops.send(ops.format_success())
 
     except Exception as e:
         import traceback
         tb = traceback.format_exc()
+        ops.err("예외 발생", f"{type(e).__name__}: {str(e)[:150]}")
+        ops.send(ops.format_failure(e, tb))
+        # 기존 브리핑 채널에도 에러 알림 유지
         try:
             from summarize.notify_slack import send_text
             send_text(

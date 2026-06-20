@@ -25,7 +25,8 @@ sys.path.insert(0, str(BASE_DIR))
 
 from db.db_manager import DBManager
 
-WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")
+WEBHOOK_URL     = os.getenv("SLACK_WEBHOOK_URL", "")
+OPS_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL_MARKET_WATCH_OPS", "")
 
 SESSION_EMOJI = {
     "asia":   "🌏",
@@ -265,6 +266,28 @@ def send_briefing(briefing_id: int = None, text: str = None,
 def send_text(text: str) -> bool:
     """임의 텍스트 바로 발송."""
     return _send_raw(text)
+
+
+def send_ops(text: str) -> bool:
+    """운영 모니터링 채널(SLACK_WEBHOOK_URL_MARKET_WATCH_OPS)로 발송."""
+    if not OPS_WEBHOOK_URL:
+        print("[notify_slack] SLACK_WEBHOOK_URL_MARKET_WATCH_OPS 미설정 — ops 발송 스킵")
+        return False
+    try:
+        resp = requests.post(
+            OPS_WEBHOOK_URL,
+            data=json.dumps({"text": text}),
+            headers={"Content-Type": "application/json"},
+            timeout=10,
+            verify=False,
+        )
+        ok = resp.status_code == 200
+        if not ok:
+            print(f"[notify_slack] ops 발송 실패: {resp.status_code} {resp.text[:100]}")
+        return ok
+    except Exception as e:
+        print(f"[notify_slack] ops 발송 오류: {e}")
+        return False
 
 
 if __name__ == "__main__":
