@@ -221,10 +221,11 @@ def format_snapshot_text(snapshot: dict) -> str:
     if stocks.get("major"):
         lines.append("\n[KOSPI/KOSDAQ 주요 종목 (시총+거래대금 기준)]")
         for s in stocks["major"]:
-            chg = f"{s['chg_pct']:+.2f}%"
-            val = f"{s['trade_val']/1e8:.0f}억"
-            cap = f"{s['mktcap']/1e12:.1f}조"
-            lines.append(f"  {s['name']:12s}  {s['market']:6s}  {s['close']:>8,}  {chg:>7s}  거래대금 {val}  시총 {cap}")
+            chg = f"{s['chg_pct']:+.2f}%" if s.get("chg_pct") is not None else "-"
+            val = f"{s['trade_val']/1e8:.0f}억" if s.get("trade_val") else "-"
+            cap = f"{s['mktcap']/1e12:.1f}조"  if s.get("mktcap")   else ""
+            cap_str = f"  시총 {cap}" if cap else ""
+            lines.append(f"  {s['name']:12s}  {s['market']:6s}  {s['close']:>8,}  {chg:>7s}  거래대금 {val}{cap_str}")
 
     if stocks.get("featured"):
         lines.append("\n[KOSPI/KOSDAQ 특징주 (등락률+거래량급증+수급)]")

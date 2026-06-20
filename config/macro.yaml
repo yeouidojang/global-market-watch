@@ -61,4 +61,3 @@ volatility:
   - name: VKOSPI
     source: krx
     kind: vkospi
-    yf_fallback: "^VKOSPI"

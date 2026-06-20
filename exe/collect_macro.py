@@ -555,11 +555,7 @@ def collect_macro(target_date: str, cfg: dict, db: DBManager) -> int:
         kind = item.get("kind", "vkospi")
         if kind == "vkospi":
             rows = fetch_krx_vkospi(target_date)
-            if not rows:
-                yf_fb = item.get("yf_fallback", "^VKOSPI")
-                print(f"  [VKOSPI→yfinance↩] fallback {yf_fb}")
-                yf_data = fetch_yf_close([yf_fb], target_date)
-                rows = yf_data.get(yf_fb, [])
+            # yfinance에 ^VKOSPI 없음 — KRX 오프라인 시 스킵
         else:
             print(f"  [macro KRX] 알 수 없는 kind={kind} (skip)")
             continue
