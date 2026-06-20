@@ -142,10 +142,18 @@ def fetch_pykrx_close(items: list[dict], target_date: str) -> dict[str, dict]:
     items: [{"name": "KOSPI", "krx_ticker": "1001"}, ...]
     반환: {name: {date, close, open, high, low, volume}}
     """
-    import pykrx.website.comm.webio as _webio
+    try:
+        import pykrx.website.comm.webio as _webio
+    except Exception as e:
+        print(f"  [pykrx IMPORT ERROR] {e}")
+        return {}
 
     # pykrx webio.Post.read 를 인증 세션으로 교체
-    s = _get_krx_session()
+    try:
+        s = _get_krx_session()
+    except Exception as e:
+        print(f"  [KRX SESSION ERROR] {e}")
+        return {}
     _orig_read = _webio.Post.read
 
     def _authed_read(self, **params):
@@ -584,7 +592,11 @@ def fetch_krx_vkospi(target_date: str, lookback_days: int = 7) -> list[dict]:
     -------
     list[dict]  [{date, close, open, high, low, volume}]
     """
-    s = _get_krx_session()
+    try:
+        s = _get_krx_session()
+    except Exception as e:
+        print(f"  [KRX VKOSPI SESSION ERROR] {e}")
+        return []
     end = pd.Timestamp(target_date).strftime("%Y%m%d")
     start = (pd.Timestamp(target_date) - pd.Timedelta(days=lookback_days)).strftime("%Y%m%d")
 
