@@ -121,6 +121,16 @@ class _OpsTracker:
         lines.append("```" + "\n".join(tail[-12:]) + "```")
         return "\n".join(lines)
 
+    def format_data_error(self, block_errors: list[str]) -> str:
+        """핵심 수집 블록 오류로 LLM 스킵됐을 때 포맷."""
+        lines = [self._header("⚠️")]
+        for ico, label, detail in self._steps:
+            lines.append(f"  {ico} {label}" + (f"  _({detail})_" if detail else ""))
+        lines.append(f"\n*데이터 수집 오류 — LLM 브리핑 스킵*")
+        for e in block_errors:
+            lines.append(f"  • {e}")
+        return "\n".join(lines)
+
     # ── 발송 ─────────────────────────────────────────────────
     def send(self, text: str):
         try:
@@ -128,6 +138,24 @@ class _OpsTracker:
             send_ops(text)
         except Exception as _e:
             print(f"[ops] 발송 실패: {_e}")
+
+
+def _run_collect_block(name: str, fn, *args, ops=None, ops_label: str = "", **kwargs):
+    """데이터 수집 블록 단위 실행.
+
+    Returns (result, error_str | None).
+    오류 시 ops에 기록하고 None 반환 — 다음 블록은 계속 실행.
+    """
+    try:
+        result = fn(*args, **kwargs)
+        return result, None
+    except Exception as e:
+        err_msg = f"{type(e).__name__}: {str(e)[:160]}"
+        label = ops_label or name
+        if ops:
+            ops.err(label, err_msg[:100])
+        print(f"  [{name} ERROR] {e}")
+        return None, f"[{name}] {err_msg}"
 
 
 def _archive_briefing_text(session: str, target_date: str, briefing_id: int, content: str) -> Path:
@@ -158,49 +186,93 @@ def run_session(session: str, target_date: str,
     macro_cfg   = load_yaml("macro.yaml")
     db = DBManager()
 
+    # ── [1/4] 데이터 수집 — 블록별 독립 실행 ─────────────────────
     print(f"\n[1/4] 데이터 수집 (session={session})")
-    lseg_open()
-    try:
-        n_idx = collect_indices(session, target_date, indices_cfg, db)
-        print(f"  지수 upserted: {n_idx}건")
-        n_mac = collect_macro(target_date, macro_cfg, db)
-        print(f"  매크로 upserted: {n_mac}건")
-        if ops: ops.ok("[1] 데이터 수집", f"지수 {n_idx}건, 매크로 {n_mac}건")
-    except Exception as _e:
-        if ops: ops.err("[1] 데이터 수집", str(_e)[:120])
-        raise
-    finally:
-        lseg_close()
+    _core_errors: list[str] = []   # 핵심 블록(지수·매크로) 오류 → LLM 게이트
 
-    # US 세션: SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)
+    # Block A: 지수 수집 (핵심)
+    try:
+        lseg_open()
+        _lseg_ok = True
+    except Exception as _e:
+        _lseg_ok = False
+        _core_errors.append(f"[LSEG 세션] {_e}")
+        if ops: ops.err("[수집] LSEG 세션", str(_e)[:80])
+
+    try:
+        n_idx, _err = _run_collect_block(
+            "지수", collect_indices, session, target_date, indices_cfg, db,
+            ops=ops, ops_label="[수집] 지수"
+        )
+        if _err:
+            _core_errors.append(_err)
+        else:
+            print(f"  지수 upserted: {n_idx}건")
+            if ops: ops.ok("[수집] 지수", f"{n_idx}건")
+
+        # Block B: 매크로 수집 (핵심)
+        n_mac, _err = _run_collect_block(
+            "매크로", collect_macro, target_date, macro_cfg, db,
+            ops=ops, ops_label="[수집] 매크로"
+        )
+        if _err:
+            _core_errors.append(_err)
+        else:
+            print(f"  매크로 upserted: {n_mac}건")
+            if ops: ops.ok("[수집] 매크로", f"{n_mac}건")
+    finally:
+        if _lseg_ok:
+            lseg_close()
+
+    # Block C: SPX OHLCV (핵심 — US 종목 스크리닝 필수)
     if session == "us":
         print(f"\n[1/4-spx] SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)")
-        try:
-            from exe.collect_us_stocks import run as _run_us_ohlcv
-            _run_us_ohlcv(target_date, target_date)
-        except Exception as _e:
-            print(f"  [SPX OHLCV 수집 ERROR] {_e}")
-            if ops: ops.warn("[1-spx] SPX OHLCV", str(_e)[:80])
+        _, _err = _run_collect_block(
+            "SPX OHLCV", lambda: __import__("exe.collect_us_stocks", fromlist=["run"]).run(target_date, target_date),
+            ops=ops, ops_label="[수집] SPX OHLCV"
+        )
+        if _err:
+            _core_errors.append(_err)
+        elif ops:
+            ops.ok("[수집] SPX OHLCV")
 
-    # Step 2: 경제지표/어닝 캘린더 (US 세션 단독 실행 시에도 수집)
+    # ── 핵심 블록 오류 게이트 ────────────────────────────────────
+    if _core_errors:
+        _err_lines = "\n".join(f"  • {e}" for e in _core_errors)
+        print(f"\n⚠️ 핵심 수집 블록 오류 {len(_core_errors)}개 — LLM 브리핑 스킵")
+        print(_err_lines)
+        if ops:
+            ops.warn("[LLM] 브리핑", f"수집 오류로 스킵 ({len(_core_errors)}블록)")
+            ops.send(ops.format_data_error(_core_errors))
+        return
+
+    # ── [2/4] 경제지표·어닝 캘린더 (보조 — 오류 시 warn, LLM 계속) ──
     if session == "us":
         print(f"\n[2/4] 경제지표 + 어닝 캘린더 수집 (이번주 월요일 ~ 다음주 금요일)")
         _mon = (pd.Timestamp(target_date) - pd.Timedelta(days=pd.Timestamp(target_date).weekday())).strftime("%Y-%m-%d")
         _fri = (pd.Timestamp(_mon) + pd.Timedelta(days=11)).strftime("%Y-%m-%d")
-        _n_econ = _n_earn = 0
-        try:
-            from exe.collect_econ_cal import collect_econ_calendar
-            _n_econ = db.upsert_econ_event(collect_econ_calendar(from_date=_mon, to_date=_fri))
+
+        _n_econ, _err = _run_collect_block(
+            "경제지표", lambda: db.upsert_econ_event(
+                __import__("exe.collect_econ_cal", fromlist=["collect_econ_calendar"]).collect_econ_calendar(from_date=_mon, to_date=_fri)
+            ), ops=ops, ops_label="[수집] 경제지표"
+        )
+        if _err:
+            if ops: ops.warn("[수집] 경제지표", "오류 — 스킵")
+        else:
             print(f"  경제지표 upserted: {_n_econ}건")
-        except Exception as _e:
-            print(f"  [경제지표 수집 ERROR] {_e}")
-        try:
-            from exe.collect_earnings_cal import collect_earnings_calendar
-            _n_earn = db.upsert_earnings_event(collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True))
+            if ops: ops.ok("[수집] 경제지표", f"{_n_econ}건")
+
+        _n_earn, _err = _run_collect_block(
+            "어닝캘린더", lambda: db.upsert_earnings_event(
+                __import__("exe.collect_earnings_cal", fromlist=["collect_earnings_calendar"]).collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True)
+            ), ops=ops, ops_label="[수집] 어닝"
+        )
+        if _err:
+            if ops: ops.warn("[수집] 어닝", "오류 — 스킵")
+        else:
             print(f"  어닝 upserted: {_n_earn}건")
-        except Exception as _e:
-            print(f"  [어닝 수집 ERROR] {_e}")
-        if ops: ops.ok("[2] 경제지표·어닝", f"경제지표 {_n_econ}건, 어닝 {_n_earn}건")
+            if ops: ops.ok("[수집] 어닝", f"{_n_earn}건")
     else:
         print(f"\n[2/4] 경제지표 캘린더 수집 (skip: {session} — global 파이프라인에서 일괄 수집)")
 
@@ -352,51 +424,102 @@ def run_global_pipeline(target_date: str,
     db = DBManager()
 
     # Step 1: 데이터 수집 (Europe + US 지수, 매크로 — LSEG 단일 세션)
+    # ── [1/5] 데이터 수집 — 블록별 독립 실행 ─────────────────────
     print(f"\n[1/5] 데이터 수집 (Europe + US 지수, 매크로)")
-    lseg_open()
+    _core_errors: list[str] = []
+
     try:
-        n_eu    = collect_indices("europe", target_date, indices_cfg, db)
-        print(f"  Europe 지수 upserted: {n_eu}건")
-        n_us    = collect_indices("us", target_date, indices_cfg, db)
-        print(f"  US 지수 upserted:     {n_us}건")
-        n_macro = collect_macro(target_date, macro_cfg, db)
-        print(f"  매크로 upserted:      {n_macro}건")
-        if ops: ops.ok("[1] 데이터 수집", f"EU {n_eu}건, US {n_us}건, 매크로 {n_macro}건")
+        lseg_open()
+        _lseg_ok = True
     except Exception as _e:
-        if ops: ops.err("[1] 데이터 수집", str(_e)[:120])
-        raise
+        _lseg_ok = False
+        _core_errors.append(f"[LSEG 세션] {_e}")
+        if ops: ops.err("[수집] LSEG 세션", str(_e)[:80])
+
+    try:
+        # Block A: Europe 지수 (핵심)
+        n_eu, _err = _run_collect_block(
+            "EU 지수", collect_indices, "europe", target_date, indices_cfg, db,
+            ops=ops, ops_label="[수집] EU 지수"
+        )
+        if _err:
+            _core_errors.append(_err)
+        else:
+            print(f"  Europe 지수 upserted: {n_eu}건")
+            if ops: ops.ok("[수집] EU 지수", f"{n_eu}건")
+
+        # Block B: US 지수 (핵심)
+        n_us, _err = _run_collect_block(
+            "US 지수", collect_indices, "us", target_date, indices_cfg, db,
+            ops=ops, ops_label="[수집] US 지수"
+        )
+        if _err:
+            _core_errors.append(_err)
+        else:
+            print(f"  US 지수 upserted:     {n_us}건")
+            if ops: ops.ok("[수집] US 지수", f"{n_us}건")
+
+        # Block C: 매크로 (핵심)
+        n_macro, _err = _run_collect_block(
+            "매크로", collect_macro, target_date, macro_cfg, db,
+            ops=ops, ops_label="[수집] 매크로"
+        )
+        if _err:
+            _core_errors.append(_err)
+        else:
+            print(f"  매크로 upserted:      {n_macro}건")
+            if ops: ops.ok("[수집] 매크로", f"{n_macro}건")
     finally:
-        lseg_close()
+        if _lseg_ok:
+            lseg_close()
 
-    # SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)
+    # Block D: SPX OHLCV (핵심)
     print(f"\n[1/5-spx] SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)")
-    try:
-        from exe.collect_us_stocks import run as _run_us_ohlcv
-        _run_us_ohlcv(target_date, target_date)
-    except Exception as _e:
-        print(f"  [SPX OHLCV 수집 ERROR] {_e}")
-        if ops: ops.warn("[1-spx] SPX OHLCV", str(_e)[:80])
+    _, _err = _run_collect_block(
+        "SPX OHLCV", lambda: __import__("exe.collect_us_stocks", fromlist=["run"]).run(target_date, target_date),
+        ops=ops, ops_label="[수집] SPX OHLCV"
+    )
+    if _err:
+        _core_errors.append(_err)
+    elif ops:
+        ops.ok("[수집] SPX OHLCV")
 
-    # Step 2: 경제지표 + 어닝 캘린더 (이번주 월요일 ~ 다음주 금요일, 1회)
+    # ── 핵심 블록 오류 게이트 ────────────────────────────────────
+    if _core_errors:
+        _err_lines = "\n".join(f"  • {e}" for e in _core_errors)
+        print(f"\n⚠️ 핵심 수집 블록 오류 {len(_core_errors)}개 — LLM 브리핑 스킵")
+        print(_err_lines)
+        if ops:
+            ops.warn("[LLM] 브리핑", f"수집 오류로 스킵 ({len(_core_errors)}블록)")
+            ops.send(ops.format_data_error(_core_errors))
+        return
+
+    # ── [2/5] 경제지표 + 어닝 캘린더 (보조) ──────────────────────
     print(f"\n[2/5] 경제지표 + SPX 어닝 캘린더 수집 (이번주 월요일 ~ 다음주 금요일)")
     _mon = (pd.Timestamp(target_date) - pd.Timedelta(days=pd.Timestamp(target_date).weekday())).strftime("%Y-%m-%d")
     _fri = (pd.Timestamp(_mon) + pd.Timedelta(days=11)).strftime("%Y-%m-%d")
-    _n_econ = _n_earn = 0
-    try:
-        from exe.collect_econ_cal import collect_econ_calendar
-        records = collect_econ_calendar(from_date=_mon, to_date=_fri)
-        _n_econ = db.upsert_econ_event(records)
+
+    _n_econ, _err = _run_collect_block(
+        "경제지표", lambda: db.upsert_econ_event(
+            __import__("exe.collect_econ_cal", fromlist=["collect_econ_calendar"]).collect_econ_calendar(from_date=_mon, to_date=_fri)
+        ), ops=ops, ops_label="[수집] 경제지표"
+    )
+    if _err:
+        if ops: ops.warn("[수집] 경제지표", "오류 — 스킵")
+    else:
         print(f"  경제지표 upserted: {_n_econ}건 ({_mon} ~ {_fri})")
-    except Exception as _e:
-        print(f"  [경제지표 수집 ERROR] {_e}")
-    try:
-        from exe.collect_earnings_cal import collect_earnings_calendar
-        e_records = collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True)
-        _n_earn = db.upsert_earnings_event(e_records)
+        if ops: ops.ok("[수집] 경제지표", f"{_n_econ}건")
+
+    _n_earn, _err = _run_collect_block(
+        "어닝캘린더", lambda: db.upsert_earnings_event(
+            __import__("exe.collect_earnings_cal", fromlist=["collect_earnings_calendar"]).collect_earnings_calendar(from_date=_mon, to_date=_fri, filter_spx=True)
+        ), ops=ops, ops_label="[수집] 어닝"
+    )
+    if _err:
+        if ops: ops.warn("[수집] 어닝", "오류 — 스킵")
+    else:
         print(f"  어닝 upserted: {_n_earn}건 ({_mon} ~ {_fri})")
-    except Exception as _e:
-        print(f"  [어닝 수집 ERROR] {_e}")
-    if ops: ops.ok("[2] 경제지표·어닝", f"경제지표 {_n_econ}건, 어닝 {_n_earn}건")
+        if ops: ops.ok("[수집] 어닝", f"{_n_earn}건")
 
     if skip_llm:
         print(f"\n[3-5/5] LLM 브리핑 + Slack (skip: --no-llm)")
@@ -605,16 +728,6 @@ def main(argv=None):
         tb = traceback.format_exc()
         ops.err("예외 발생", f"{type(e).__name__}: {str(e)[:150]}")
         ops.send(ops.format_failure(e, tb))
-        # 기존 브리핑 채널에도 에러 알림 유지
-        try:
-            from summarize.notify_slack import send_text
-            send_text(
-                f"🚨 *Market Watch 오류* [{args.session.upper()}] ({target_date})\n"
-                f"`{type(e).__name__}: {str(e)[:300]}`\n"
-                f"```{tb[-600:]}```"
-            )
-        except Exception:
-            pass
         raise
 
 

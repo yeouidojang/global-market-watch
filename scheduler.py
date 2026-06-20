@@ -56,11 +56,6 @@ def _run_asia():
         log.error(f"[asia] 오류: {e}", exc_info=True)
         ops.err("예외 발생", f"{type(e).__name__}: {str(e)[:150]}")
         ops.send(ops.format_failure(e, tb))
-        try:
-            from summarize.notify_slack import send_text
-            send_text(f"⚠️ *Market Watch 오류* [ASIA]\n{str(e)[:200]}")
-        except Exception:
-            pass
     log.info(f"▶ ASIA 세션 완료")
 
 
@@ -83,11 +78,6 @@ def _run_global():
         log.error(f"[global] 오류: {e}", exc_info=True)
         ops.err("예외 발생", f"{type(e).__name__}: {str(e)[:150]}")
         ops.send(ops.format_failure(e, tb))
-        try:
-            from summarize.notify_slack import send_text
-            send_text(f"⚠️ *Market Watch 오류* [GLOBAL]\n{str(e)[:200]}")
-        except Exception:
-            pass
     log.info(f"▶ GLOBAL 통합 파이프라인 완료")
 
 
