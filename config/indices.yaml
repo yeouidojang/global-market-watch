@@ -6,9 +6,11 @@ asia:
     - name: KOSPI
       source: pykrx
       krx_ticker: "1001"
+      yf_fallback: "^KS11"
     - name: KOSDAQ
       source: pykrx
       krx_ticker: "2001"
+      yf_fallback: "^KQ11"
   japan:
     # NEXT FUNDS Nikkei 225 ETF (1321.T) — ^N225보다 안정적이고
     # ^N225가 누락하는 날짜(예: 2026-06-10)도 정상 커버. 등락률은 N225와 동일.

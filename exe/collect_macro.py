@@ -338,10 +338,22 @@ def collect_indices(session: str, target_date: str, cfg: dict, db: DBManager) ->
         yf_items    = [i for i in items if i.get("source") == "yfinance"]
         lseg_items  = [i for i in items if i.get("source") not in ("pykrx", "yfinance")]
 
-        # pykrx 수집
+        # pykrx 수집 (실패 시 yf_fallback으로 재시도)
         if pykrx_items:
             print(f"  [{region_name}/pykrx] {[i['name'] for i in pykrx_items]}")
             prices = fetch_pykrx_close(pykrx_items, target_date)
+
+            # fallback: pykrx 미수집 항목 → yfinance
+            missing = [i for i in pykrx_items if i["name"] not in prices and i.get("yf_fallback")]
+            if missing:
+                fb_tickers  = [i["yf_fallback"] for i in missing]
+                fb_name_map = {i["yf_fallback"]: i["name"] for i in missing}
+                print(f"  [{region_name}/yfinance↩] pykrx fallback {fb_tickers}")
+                yf_data = fetch_yf_close(fb_tickers, target_date)
+                for ticker, rows in yf_data.items():
+                    if rows:
+                        prices[fb_name_map[ticker]] = rows[-1]
+
             for name, vals in prices.items():
                 rec_date = vals.pop("date", target_date)
                 records.append({
@@ -543,6 +555,11 @@ def collect_macro(target_date: str, cfg: dict, db: DBManager) -> int:
         kind = item.get("kind", "vkospi")
         if kind == "vkospi":
             rows = fetch_krx_vkospi(target_date)
+            if not rows:
+                yf_fb = item.get("yf_fallback", "^VKOSPI")
+                print(f"  [VKOSPI→yfinance↩] fallback {yf_fb}")
+                yf_data = fetch_yf_close([yf_fb], target_date)
+                rows = yf_data.get(yf_fb, [])
         else:
             print(f"  [macro KRX] 알 수 없는 kind={kind} (skip)")
             continue

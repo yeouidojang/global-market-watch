@@ -22,6 +22,121 @@ from exe.collect_macro import _get_krx_session, _KRX_UA
 _webio = None
 _PATCH_SENTINEL = object()
 
+# KRX 오프라인 시 yfinance fallback 사전 정의 종목 리스트
+# (ticker_krx, name, market, yf_ticker)
+_KR_FALLBACK_STOCKS = [
+    # KOSPI 대형주 20
+    ("005930", "삼성전자",        "KOSPI",  "005930.KS"),
+    ("000660", "SK하이닉스",      "KOSPI",  "000660.KS"),
+    ("035420", "NAVER",           "KOSPI",  "035420.KS"),
+    ("005380", "현대차",          "KOSPI",  "005380.KS"),
+    ("000270", "기아",            "KOSPI",  "000270.KS"),
+    ("207940", "삼성바이오로직스", "KOSPI", "207940.KS"),
+    ("051910", "LG화학",          "KOSPI",  "051910.KS"),
+    ("105560", "KB금융",          "KOSPI",  "105560.KS"),
+    ("068270", "셀트리온",        "KOSPI",  "068270.KS"),
+    ("055550", "신한지주",        "KOSPI",  "055550.KS"),
+    ("373220", "LG에너지솔루션",  "KOSPI",  "373220.KS"),
+    ("086790", "하나금융지주",    "KOSPI",  "086790.KS"),
+    ("028260", "삼성물산",        "KOSPI",  "028260.KS"),
+    ("032830", "삼성생명",        "KOSPI",  "032830.KS"),
+    ("017670", "SK텔레콤",        "KOSPI",  "017670.KS"),
+    ("066570", "LG전자",          "KOSPI",  "066570.KS"),
+    ("012330", "현대모비스",      "KOSPI",  "012330.KS"),
+    ("003550", "LG",              "KOSPI",  "003550.KS"),
+    ("030200", "KT",              "KOSPI",  "030200.KS"),
+    ("036570", "엔씨소프트",      "KOSPI",  "036570.KS"),
+    # KOSDAQ 대형주 10
+    ("247540", "에코프로비엠",    "KOSDAQ", "247540.KQ"),
+    ("086520", "에코프로",        "KOSDAQ", "086520.KQ"),
+    ("196170", "알테오젠",        "KOSDAQ", "196170.KQ"),
+    ("091990", "셀트리온헬스케어","KOSDAQ", "091990.KQ"),
+    ("035900", "JYP Ent",         "KOSDAQ", "035900.KQ"),
+    ("041510", "에스엠",          "KOSDAQ", "041510.KQ"),
+    ("357780", "솔브레인",        "KOSDAQ", "357780.KQ"),
+    ("112040", "위메이드",        "KOSDAQ", "112040.KQ"),
+    ("263750", "펄어비스",        "KOSDAQ", "263750.KQ"),
+    ("240810", "원텍",            "KOSDAQ", "240810.KQ"),
+]
+
+
+def _yfinance_fallback_top_stocks(target_date: str, n_major: int) -> dict:
+    """KRX 오프라인 시 yfinance로 주요 종목 대체 수집 (종목명·가격·등락률)."""
+    import yfinance as yf
+
+    yf_tickers  = [r[3] for r in _KR_FALLBACK_STOCKS]
+    meta        = {r[3]: (r[0], r[1], r[2]) for r in _KR_FALLBACK_STOCKS}
+
+    start = (pd.Timestamp(target_date) - pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+    end   = (pd.Timestamp(target_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    _empty = {"major": [], "featured": [], "investor_flow": [],
+              "major_kospi": [], "major_kosdaq": [],
+              "featured_kospi": [], "featured_kosdaq": [],
+              "breadth": {}, "market_flow": {},
+              "breadth_kospi": {}, "breadth_kosdaq": {},
+              "market_flow_kospi": {}, "market_flow_kosdaq": {}}
+    try:
+        df = yf.download(yf_tickers, start=start, end=end,
+                         progress=False, auto_adjust=True, group_by="ticker")
+    except Exception as e:
+        print(f"  [yfinance fallback ERROR] {e}")
+        return _empty
+
+    def _safe(v):
+        try:
+            return None if pd.isna(v) else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    kospi_rows, kosdaq_rows = [], []
+    for yft, (krx_id, name, market) in meta.items():
+        try:
+            sub = df[yft].dropna(how="all") if isinstance(df.columns, pd.MultiIndex) else df.dropna(how="all")
+            if sub.empty:
+                continue
+            close     = _safe(sub["Close"].iloc[-1])
+            prev      = _safe(sub["Close"].iloc[-2]) if len(sub) >= 2 else None
+            chg_pct   = round((close - prev) / prev * 100, 2) if close and prev and prev > 0 else None
+            volume    = int(_safe(sub["Volume"].iloc[-1]) or 0)
+            trade_val = int(close * volume) if close and volume else 0
+            entry = {
+                "ticker":    krx_id,
+                "name":      name,
+                "market":    market,
+                "close":     int(close) if close else None,
+                "chg_pct":   chg_pct,
+                "ret_1w":    None,
+                "ret_1m":    None,
+                "trade_val": trade_val,
+                "tv_chg":    None,
+                "mktcap":    None,
+            }
+            (kospi_rows if market == "KOSPI" else kosdaq_rows).append(entry)
+        except Exception:
+            pass
+
+    kospi_rows.sort(key=lambda x: x.get("trade_val") or 0, reverse=True)
+    kosdaq_rows.sort(key=lambda x: x.get("trade_val") or 0, reverse=True)
+    major_kospi  = kospi_rows[:n_major]
+    major_kosdaq = kosdaq_rows[:n_major]
+
+    return {
+        "major_kospi":       major_kospi,
+        "major_kosdaq":      major_kosdaq,
+        "featured_kospi":    [],
+        "featured_kosdaq":   [],
+        "breadth_kospi":     {},
+        "breadth_kosdaq":    {},
+        "market_flow_kospi": {},
+        "market_flow_kosdaq":{},
+        "major":             major_kospi + major_kosdaq,
+        "featured":          [],
+        "investor_flow":     [],
+        "breadth":           {},
+        "market_flow":       {},
+    }
+
 
 def _cumulative_adr_wide(close_frames: dict, n_days: int = 20) -> float | None:
     """yfinance-style {ticker: DataFrame(Close=...)} → n일 누적 ADR.
@@ -159,6 +274,11 @@ def fetch_top_stocks(
     }
     """
     orig = _patch_webio()
+    if orig is _PATCH_SENTINEL:
+        # KRX 세션 실패 — yfinance fallback
+        print(f"  [KRX 오프라인] yfinance fallback 종목 수집 ({len(_KR_FALLBACK_STOCKS)}개)")
+        return _yfinance_fallback_top_stocks(target_date, n_major)
+
     try:
         from pykrx import stock
 
@@ -598,7 +718,9 @@ def fetch_top_stocks(
 
     except Exception as e:
         print(f"  [collect_stocks ERROR] {e}")
-        return {"major": [], "featured": []}
+        print(f"  [yfinance fallback 시도]")
+        _restore_webio(orig)
+        return _yfinance_fallback_top_stocks(target_date, n_major)
     finally:
         _restore_webio(orig)
 
