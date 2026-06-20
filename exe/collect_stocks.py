@@ -17,7 +17,10 @@ sys.path.insert(0, str(BASE_DIR))
 import pandas as pd
 
 from exe.collect_macro import _get_krx_session, _KRX_UA
-import pykrx.website.comm.webio as _webio
+
+# KRX 연결을 import 시점이 아닌 실제 호출 시점까지 지연 (주말·야간 KRX 점검 대응)
+_webio = None
+_PATCH_SENTINEL = object()
 
 
 def _cumulative_adr_wide(close_frames: dict, n_days: int = 20) -> float | None:
@@ -91,8 +94,20 @@ def _cumulative_adr_db(session: str, category: str, target_date: str,
 
 
 def _patch_webio():
-    """pykrx webio를 KRX 인증 세션으로 교체."""
+    """pykrx webio를 KRX 인증 세션으로 교체. KRX 오프라인 시 _PATCH_SENTINEL 반환."""
+    global _webio
+    if _webio is None:
+        try:
+            import pykrx.website.comm.webio as _w
+            _webio = _w
+        except Exception as e:
+            print(f"  [pykrx webio import ERROR] {e}")
+            return _PATCH_SENTINEL
+
     s = _get_krx_session()
+    if s is None:
+        return _PATCH_SENTINEL
+
     orig = _webio.Post.read
 
     def _authed(self, **params):
@@ -108,7 +123,8 @@ def _patch_webio():
 
 
 def _restore_webio(orig):
-    _webio.Post.read = orig
+    if orig is not _PATCH_SENTINEL and _webio is not None:
+        _webio.Post.read = orig
 
 
 def fetch_top_stocks(
