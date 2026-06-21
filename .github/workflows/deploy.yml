@@ -23,7 +23,7 @@ jobs:
             git reset --hard origin/main
 
             echo "=== pip install (변경 시) ==="
-            .venv/bin/pip install -q -r requirements.txt
+            .venv/bin/python3 -m pip install -q -r requirements.txt
 
             echo "=== 서비스 재시작 ==="
             sudo systemctl restart market-watch
