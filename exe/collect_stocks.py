@@ -155,7 +155,7 @@ def _cumulative_adr_wide(close_frames: dict, n_days: int = 20) -> float | None:
             return None
         cum_up   = int((chg > 0).sum().sum())
         cum_down = int((chg < 0).sum().sum())
-        return round(cum_up / cum_down, 2) if cum_down > 0 else None
+        return round(cum_up / (cum_up + cum_down) * 100, 1) if (cum_up + cum_down) > 0 else None
     except Exception:
         return None
 
@@ -173,24 +173,33 @@ def _cumulative_adr_long(hist_df: pd.DataFrame, n_days: int = 20) -> float | Non
             return None
         cum_up   = int((chg > 0).sum().sum())
         cum_down = int((chg < 0).sum().sum())
-        return round(cum_up / cum_down, 2) if cum_down > 0 else None
+        return round(cum_up / (cum_up + cum_down) * 100, 1) if (cum_up + cum_down) > 0 else None
     except Exception:
         return None
 
 
 def _cumulative_adr_db(session: str, category: str, target_date: str,
-                        n_days: int = 20) -> float | None:
-    """DB market_daily에서 n일 누적 ADR 계산 (한국·해외 공용)."""
+                        n_days: int = 20, market: str | None = None) -> float | None:
+    """DB market_daily에서 n일 누적 ADR 계산 (한국·해외 공용).
+    market 지정 시 해당 시장(KOSPI/KOSDAQ)만 필터링.
+    """
     try:
         from db.db_manager import DBManager
         hist_start = (pd.Timestamp(target_date) - pd.Timedelta(days=n_days * 2 + 5)
                       ).strftime("%Y-%m-%d")
         conn = DBManager()._connect()
-        rows = conn.execute(
-            "SELECT date, name, close FROM market_daily "
-            "WHERE session=? AND category=? AND date BETWEEN ? AND ? AND close > 0",
-            (session, category, hist_start, target_date),
-        ).fetchall()
+        if market:
+            rows = conn.execute(
+                "SELECT date, name, close FROM market_daily "
+                "WHERE session=? AND category=? AND market=? AND date BETWEEN ? AND ? AND close > 0",
+                (session, category, market, hist_start, target_date),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT date, name, close FROM market_daily "
+                "WHERE session=? AND category=? AND date BETWEEN ? AND ? AND close > 0",
+                (session, category, hist_start, target_date),
+            ).fetchall()
         conn.close()
         if not rows:
             return None
@@ -203,7 +212,7 @@ def _cumulative_adr_db(session: str, category: str, target_date: str,
             return None
         cum_up   = int((chg > 0).sum().sum())
         cum_down = int((chg < 0).sum().sum())
-        return round(cum_up / cum_down, 2) if cum_down > 0 else None
+        return round(cum_up / (cum_up + cum_down) * 100, 1) if (cum_up + cum_down) > 0 else None
     except Exception:
         return None
 
@@ -364,6 +373,7 @@ def fetch_top_stocks(
                 {
                     "date": target_date, "session": "asia", "category": "stock",
                     "name": row["ticker"],
+                    "market": row.get("market"),
                     "close":  row.get("close"),  "open": row.get("open"),
                     "high":   row.get("high"),   "low":  row.get("low"),
                     "volume": row.get("volume"),
@@ -384,12 +394,11 @@ def fetch_top_stocks(
             flat  = int((v["chg_pct"] == 0).sum())
             total = up + down + flat
             tv    = float(v["trade_val"].sum())
-            # 20일 누적 ADR: DB market_daily(session=asia, category=stock) 활용
-            # market_filter(KOSPI/KOSDAQ) 분리는 DB에 market 컬럼 없으므로 전체만 지원
-            adr_20 = (_cumulative_adr_db("asia", "stock", target_date)
-                      if market_filter is None else None)
+            # 20일 누적 ADR: market_daily.market 컬럼으로 KOSPI/KOSDAQ 분리 지원
+            adr_20 = _cumulative_adr_db("asia", "stock", target_date,
+                                         market=market_filter)
             if adr_20 is None:
-                adr_20 = round(up / down, 2) if down > 0 else None
+                adr_20 = round(up / (up + down) * 100, 1) if (up + down) > 0 else None
             return {
                 "up": up, "down": down, "flat": flat, "total": total,
                 "up_pct":       round(up / total * 100, 1) if total > 0 else None,
@@ -399,9 +408,9 @@ def fetch_top_stocks(
             }
 
         valid = ohlcv[ohlcv["close"] > 0].copy()
-        breadth        = _compute_breadth(valid)                                     # 전체: 20일 DB ADR
-        breadth_kospi  = _compute_breadth(valid[valid["market"] == "KOSPI"],  "KOSPI")   # 당일 ADR
-        breadth_kosdaq = _compute_breadth(valid[valid["market"] == "KOSDAQ"], "KOSDAQ")  # 당일 ADR
+        breadth        = _compute_breadth(valid)                                          # 전체: 20일 DB ADR
+        breadth_kospi  = _compute_breadth(valid[valid["market"] == "KOSPI"],  "KOSPI")   # 20일 DB ADR
+        breadth_kosdaq = _compute_breadth(valid[valid["market"] == "KOSDAQ"], "KOSDAQ")  # 20일 DB ADR
 
         # ── 1b. 전주/전월 종가 조회 (1W/1M 수익률 계산용) ───────────
         def _fetch_prev_close(back_range: tuple) -> dict[str, float]:

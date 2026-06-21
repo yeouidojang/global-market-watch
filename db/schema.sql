@@ -5,8 +5,9 @@
 CREATE TABLE IF NOT EXISTS market_daily (
     date        TEXT NOT NULL,          -- YYYY-MM-DD
     session     TEXT NOT NULL,          -- asia | europe | us | macro
-    category    TEXT NOT NULL,          -- index | fx | rate | commodity | volatility
+    category    TEXT NOT NULL,          -- index | fx | rate | commodity | volatility | stock
     name        TEXT NOT NULL,          -- 식별자 (KOSPI, USD_KRW 등)
+    market      TEXT,                   -- KOSPI | KOSDAQ (asia stock 전용)
     close       REAL,
     open        REAL,
     high        REAL,
@@ -134,6 +135,7 @@ CREATE INDEX IF NOT EXISTS idx_us_stocks_daily_date   ON us_stocks_daily(date);
 CREATE INDEX IF NOT EXISTS idx_us_stocks_daily_ticker ON us_stocks_daily(ticker);
 CREATE INDEX IF NOT EXISTS idx_market_daily_date   ON market_daily(date);
 CREATE INDEX IF NOT EXISTS idx_market_daily_name   ON market_daily(name);
+CREATE INDEX IF NOT EXISTS idx_market_daily_market ON market_daily(session, category, market, date);
 CREATE INDEX IF NOT EXISTS idx_econ_calendar_date  ON econ_calendar(event_date);
 CREATE INDEX IF NOT EXISTS idx_briefings_date      ON briefings(date, session);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_econ_unique

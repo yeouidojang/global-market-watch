@@ -67,7 +67,7 @@ def _fmt_market_structure(session: str, stocks_data: dict) -> str:
             row += f"({up_pct:.1f}%)"
         row += f"  하락 {down}/{total}"
         if adr is not None:
-            row += f"  ADR {adr:.2f}"
+            row += f"  ADR {adr:.1f}%"
         if w_chg is not None:
             row += f"  거래대금가중등락 {w_chg:+.2f}%"
         parts.append(row)
@@ -93,7 +93,7 @@ def _fmt_market_structure(session: str, stocks_data: dict) -> str:
                 seg = f"폭 {up}/{tot}"
                 if up_pct is not None: seg += f"({up_pct:.1f}%)"
                 seg += f" vs {dn}/{tot}"
-                if adr is not None: seg += f"  ADR {adr:.2f}"
+                if adr is not None: seg += f"  ADR {adr:.1f}%"
                 if wch is not None: seg += f"  가중등락 {wch:+.2f}%"
                 sub.append(seg)
             if mf:
@@ -180,7 +180,7 @@ def _fmt_stocks_asia(stocks_data: dict) -> str:
         b = overseas.get(mk, {}).get("breadth", {})
         if b:
             up_pct = f"{b['up_pct']:.1f}%" if b.get("up_pct") is not None else "-"
-            adr    = f"{b['adr']:.2f}"      if b.get("adr")    is not None else "-"
+            adr    = f"{b['adr']:.1f}%"      if b.get("adr")    is not None else "-"
             wch    = f"{b['weighted_chg']:+.2f}%" if b.get("weighted_chg") is not None else "-"
             brd_rows.append(
                 f"| {lbl} | {b.get('up',0)}/{b.get('total',0)} | {up_pct} | {adr} | {wch} |")
@@ -411,7 +411,7 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
             down   = eu_breadth.get("down", 0)
             total  = eu_breadth.get("total", 0)
             up_pct = f"{eu_breadth['up_pct']:.1f}%" if eu_breadth.get("up_pct") is not None else "-"
-            adr    = f"{eu_breadth['adr']:.2f}"     if eu_breadth.get("adr")    is not None else "-"
+            adr    = f"{eu_breadth['adr']:.1f}%"     if eu_breadth.get("adr")    is not None else "-"
             lines.append("\n## [Sub] 시장 폭 — DAX·FTSE100·CAC40")
             lines.append("| 시장 | 상승/전체 | 상승% | ADR(20일) |")
             lines.append("|------|:---------:|------:|----:|")
@@ -488,7 +488,7 @@ def build_prompt(session: str, snapshot_text: str, stocks_data: dict = None) -> 
 Chg%는 거래대금 전일대비 변화율입니다.
 분석 관점:
   - KOSPI+KOSDAQ 시장 폭(ADR 20일 누적)으로 광범위 상승 vs 소수 집중 판단
-    (ADR >1.5 광범위 강세 / 1.0~1.5 중립∼완만한 강세 / <0.7 광범위 약세)
+    (ADR >60% 광범위 강세 / 50~60% 중립∼완만한 강세 / <40% 광범위 약세)
   - KOSPI vs KOSDAQ 강세 시장·자금 집중 방향
   - 외인·기관 수급 동반 여부 (수급 있는 급등 vs 수급 없는 급등 구분)
   - 급등락+거래대금급증 특징주의 테마 (반도체·전기차·금융·에너지 등)
@@ -498,7 +498,7 @@ Chg%는 거래대금 전일대비 변화율입니다.
 각 표에 일본→중국→홍콩 순으로 행이 정렬돼 있습니다.
 국가별로 분리해 분석하고, 강세/약세 섹터·대형주 방향성을 서술하세요.
   - 각 국가의 시장 폭(상승비율·ADR 20일 누적)으로 광범위 상승 vs 소수 집중 판단
-    (ADR >1.5 광범위 강세 / 1.0~1.5 중립∼완만한 강세 / <0.7 광범위 약세)
+    (ADR >60% 광범위 강세 / 50~60% 중립∼완만한 강세 / <40% 광범위 약세)
   - 시총/거래대금 상위 대형주 수급·테마 식별
   - 특징주 급등락 배경 및 테마 (반도체·전기차·금융·부동산 등)
   - 해외 → 한국 전이 테마 명시적 연결
@@ -607,7 +607,7 @@ Chg%는 거래대금 전일대비 변화율입니다.
 {'종목표 형식: `분류(지수명) | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 거래대금(B) | 비고`' if has_europe else ''}
 {'지수별(DAX/FTSE100/CAC40)로 분리해 분석하고, 강세/약세 섹터·대형주 방향성을 서술하세요.' if has_europe else ''}
 {'분석 관점:' if has_europe else ''}
-{'  - 시장 폭(상승비율·ADR 20일 누적)으로 DAX/FTSE/CAC 광범위 상승 vs 소수 집중 판단 (ADR >1.5 광범위 강세 / 1.0~1.5 중립∼완만한 강세 / <0.7 광범위 약세)' if has_europe else ''}
+{'  - 시장 폭(상승비율·ADR 20일 누적)으로 DAX/FTSE/CAC 광범위 상승 vs 소수 집중 판단 (ADR >60% 광범위 강세 / 50~60% 중립∼완만한 강세 / <40% 광범위 약세)' if has_europe else ''}
 {'  - STOXX600 섹터: 강세/약세 섹터 2~3개 집중 분석' if has_europe else ''}
 {'  - DAX/FTSE/CAC 지수별 시총·거래대금 상위 대형주 수급·방향성 구분' if has_europe else ''}
 {'  - 급등락 특징주 테마 (자동차·럭셔리·에너지·금융·헬스케어 등) 및 미국·아시아 전이 가능성' if has_europe else ''}

@@ -55,6 +55,12 @@ class DBManager:
             """)
             conn.commit()
 
+        # market_daily.market 컬럼 추가 마이그레이션 (executescript 전에 실행)
+        md_cols = [r[1] for r in conn.execute("PRAGMA table_info(market_daily)").fetchall()]
+        if md_cols and "market" not in md_cols:
+            conn.execute("ALTER TABLE market_daily ADD COLUMN market TEXT")
+            conn.commit()
+
         conn.executescript(schema)
         conn.commit()
 
@@ -134,15 +140,17 @@ class DBManager:
         """
         if not records:
             return 0
-        # pandas NA/NaN → None (sqlite3 미지원 타입 방지)
+        # pandas NA/NaN → None (sqlite3 미지원 타입 방지), market 기본값 보정
         records = [
-            {k: (None if pd.isna(v) else v) for k, v in r.items()}
+            {k: (None if (not isinstance(v, str) and pd.isna(v)) else v)
+             for k, v in {**{"market": None}, **r}.items()}
             for r in records
         ]
         sql = """
-            INSERT INTO market_daily (date, session, category, name, close, open, high, low, volume)
-            VALUES (:date, :session, :category, :name, :close, :open, :high, :low, :volume)
+            INSERT INTO market_daily (date, session, category, name, market, close, open, high, low, volume)
+            VALUES (:date, :session, :category, :name, :market, :close, :open, :high, :low, :volume)
             ON CONFLICT(date, name) DO UPDATE SET
+                market = COALESCE(excluded.market, market),
                 close  = excluded.close,
                 open   = excluded.open,
                 high   = excluded.high,
@@ -769,7 +777,7 @@ class DBManager:
         return {
             "up": up, "down": down, "flat": flat, "total": total,
             "up_pct":       round(up / total * 100, 1) if total > 0 else None,
-            "adr":          round(up / down, 2)         if down > 0 else None,
+            "adr":          round(up / (up + down) * 100, 1) if (up + down) > 0 else None,
             "weighted_chg": round(
                 sum(c * tv for c, tv in zip(chg_list, tv_list)) / tv_sum, 2
             ) if tv_sum > 0 else None,
