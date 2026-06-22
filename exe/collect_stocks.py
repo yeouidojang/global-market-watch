@@ -155,7 +155,7 @@ def _cumulative_adr_wide(close_frames: dict, n_days: int = 20) -> float | None:
             return None
         cum_up   = int((chg > 0).sum().sum())
         cum_down = int((chg < 0).sum().sum())
-        return round(cum_up / (cum_up + cum_down) * 100, 1) if (cum_up + cum_down) > 0 else None
+        return round(cum_up / cum_down * 100, 1) if cum_down > 0 else None
     except Exception:
         return None
 
@@ -173,7 +173,7 @@ def _cumulative_adr_long(hist_df: pd.DataFrame, n_days: int = 20) -> float | Non
             return None
         cum_up   = int((chg > 0).sum().sum())
         cum_down = int((chg < 0).sum().sum())
-        return round(cum_up / (cum_up + cum_down) * 100, 1) if (cum_up + cum_down) > 0 else None
+        return round(cum_up / cum_down * 100, 1) if cum_down > 0 else None
     except Exception:
         return None
 
@@ -212,7 +212,7 @@ def _cumulative_adr_db(session: str, category: str, target_date: str,
             return None
         cum_up   = int((chg > 0).sum().sum())
         cum_down = int((chg < 0).sum().sum())
-        return round(cum_up / (cum_up + cum_down) * 100, 1) if (cum_up + cum_down) > 0 else None
+        return round(cum_up / cum_down * 100, 1) if cum_down > 0 else None
     except Exception:
         return None
 
@@ -398,7 +398,7 @@ def fetch_top_stocks(
             adr_20 = _cumulative_adr_db("asia", "stock", target_date,
                                          market=market_filter)
             if adr_20 is None:
-                adr_20 = round(up / (up + down) * 100, 1) if (up + down) > 0 else None
+                adr_20 = round(up / down * 100, 1) if down > 0 else None
             return {
                 "up": up, "down": down, "flat": flat, "total": total,
                 "up_pct":       round(up / total * 100, 1) if total > 0 else None,
@@ -1049,7 +1049,7 @@ def _fetch_asia_market(chain: str, target_date: str,
     tot  = up + down + flat
     adr_20 = _cumulative_adr_long(hist) if hist is not None and not hist.empty else None
     if adr_20 is None:
-        adr_20 = round(up / down, 2) if down > 0 else None
+        adr_20 = round(up / down * 100, 1) if down > 0 else None
     breadth = {
         "up": up, "down": down, "flat": flat, "total": tot,
         "up_pct": round(up / tot * 100, 1) if tot > 0 else None,
@@ -1419,7 +1419,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
         _total = _up + _down + _flat
         _adr_20 = _cumulative_adr_wide(stock_data)
         if _adr_20 is None:
-            _adr_20 = round(_up / _down, 2) if _down > 0 else None
+            _adr_20 = round(_up / _down * 100, 1) if _down > 0 else None
         eu_breadth = {
             "up": _up, "down": _down, "flat": _flat, "total": _total,
             "up_pct": round(_up / _total * 100, 1) if _total > 0 else None,
@@ -1925,7 +1925,7 @@ def fetch_us_stocks(
         _total = _up + _down + _flat
         _dv_sum = sum(s["dollar_vol"] for s in stats.values())
         if _adr_20_us is None:
-            _adr_20_us = round(_up / _down, 2) if _down > 0 else None
+            _adr_20_us = round(_up / _down * 100, 1) if _down > 0 else None
         us_breadth = {
             "up": _up, "down": _down, "flat": _flat, "total": _total,
             "up_pct":       round(_up / _total * 100, 1) if _total > 0 else None,
