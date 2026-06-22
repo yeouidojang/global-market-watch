@@ -392,12 +392,12 @@ def run_session(session: str, target_date: str,
 
     if session != "europe":
         try:
-            from summarize.notify_clickup import send_briefing_to_docs
-            send_briefing_to_docs(content=content, session=session, date=target_date)
-            if ops: ops.ok("[4] ClickUp 발송")
+            from summarize.notify_clickup import send_briefing_pdf
+            send_briefing_pdf(content=content, session=session, date=target_date)
+            if ops: ops.ok("[4] ClickUp PDF 발송")
         except Exception as _cu_e:
-            print(f"  [ClickUp 발송 ERROR] {_cu_e}")
-            if ops: ops.warn("[4] ClickUp", str(_cu_e)[:80])
+            print(f"  [ClickUp PDF 발송 ERROR] {_cu_e}")
+            if ops: ops.warn("[4] ClickUp PDF", str(_cu_e)[:80])
 
     print(f"\n✅ 완료: {session.upper()} 세션 파이프라인")
 
@@ -612,12 +612,12 @@ def run_global_pipeline(target_date: str,
         if ops: ops.ok("[5] Slack 브리핑 발송", f"id={latest['id']}")
 
     try:
-        from summarize.notify_clickup import send_briefing_to_docs
-        send_briefing_to_docs(content=us_content, session="global", date=target_date)
-        if ops: ops.ok("[5] ClickUp 발송")
+        from summarize.notify_clickup import send_briefing_pdf
+        send_briefing_pdf(content=us_content, session="global", date=target_date)
+        if ops: ops.ok("[5] ClickUp PDF 발송")
     except Exception as _cu_e:
-        print(f"  [ClickUp 발송 ERROR] {_cu_e}")
-        if ops: ops.warn("[5] ClickUp", str(_cu_e)[:80])
+        print(f"  [ClickUp PDF 발송 ERROR] {_cu_e}")
+        if ops: ops.warn("[5] ClickUp PDF", str(_cu_e)[:80])
 
     print(f"\n✅ 완료: GLOBAL 통합 파이프라인")
 

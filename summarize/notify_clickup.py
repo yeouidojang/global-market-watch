@@ -36,10 +36,12 @@ import requests
 CLICKUP_TOKEN = os.getenv("CLICKUP_API_TOKEN", "")
 WORKSPACE_ID  = os.getenv("CLICKUP_WORKSPACE_ID", "")
 DOC_ID        = os.getenv("CLICKUP_BRIEFING_DOC_ID", "")
+LIST_ID       = os.getenv("CLICKUP_LIST_ID", "")        # PDF Task 첨부용 List ID
 
 SESSION_LABEL = {
-    "asia": "Asia 시황",
-    "us":   "Global 시황",
+    "asia":   "Asia 시황",
+    "us":     "Global 시황",
+    "global": "Global 시황",
 }
 
 
@@ -134,4 +136,90 @@ def send_briefing_to_docs(content: str, session: str = "", date: str = "") -> st
         return None
     except Exception as e:
         print(f"[notify_clickup] 예외: {e}")
+        return None
+
+
+def send_briefing_pdf(content: str, session: str = "", date: str = "") -> str | None:
+    """브리핑 마크다운을 PDF로 변환해 ClickUp Task에 첨부 파일로 업로드.
+
+    필요 환경변수 (.env):
+      CLICKUP_API_TOKEN   — Personal token (pk_...)
+      CLICKUP_LIST_ID     — PDF Task를 생성할 List ID
+        (ClickUp → List URL의 /l/{LIST_ID} 또는 GET /api/v2/team/.../space/.../list)
+
+    동작:
+      1. 브리핑 마크다운 → PDF 생성 (logs/briefings_pdf/{session}/{date}.pdf 저장)
+      2. ClickUp List에 일자별 Task 신규 생성
+      3. 생성된 Task에 PDF를 attachment로 업로드
+
+    Returns
+    -------
+    str | None  생성된 task_id, 실패 시 None
+    """
+    if not all([CLICKUP_TOKEN, LIST_ID]):
+        missing = [k for k, v in {
+            "CLICKUP_API_TOKEN": CLICKUP_TOKEN,
+            "CLICKUP_LIST_ID":   LIST_ID,
+        }.items() if not v]
+        print(f"[notify_clickup] 환경변수 미설정: {missing} — PDF 발송 건너뜀")
+        return None
+
+    label    = SESSION_LABEL.get(session, session.upper())
+    title    = f"{date} {label} 브리핑"
+    filename = f"{date}_{session}_briefing.pdf"
+    save_path = BASE_DIR / "logs" / "briefings_pdf" / session / f"{date}.pdf"
+
+    # ── Step 1: PDF 생성 ────────────────────────────────────────────────
+    try:
+        from summarize.generate_pdf import generate_pdf
+        pdf_bytes = generate_pdf(content, title, save_path=save_path)
+        print(f"[notify_clickup] PDF 생성 완료: {filename} ({len(pdf_bytes):,} bytes)")
+    except Exception as e:
+        print(f"[notify_clickup] PDF 생성 실패: {e}")
+        return None
+
+    headers_json = {
+        "Authorization": CLICKUP_TOKEN,
+        "Content-Type":  "application/json",
+    }
+
+    # ── Step 2: Task 생성 ───────────────────────────────────────────────
+    task_payload = {
+        "name":        title,
+        "description": f"자동 생성 시황 브리핑 ({session.upper()} 세션, {date})",
+        "status":      "complete",
+        "tags":        ["briefing", session],
+    }
+    try:
+        task_resp = requests.post(
+            f"https://api.clickup.com/api/v2/list/{LIST_ID}/task",
+            headers=headers_json, json=task_payload, timeout=30, verify=False,
+        )
+        task_resp.raise_for_status()
+        task_id = task_resp.json().get("id", "")
+        print(f"[notify_clickup] Task 생성: {title} (task_id={task_id})")
+    except requests.HTTPError:
+        print(f"[notify_clickup] Task 생성 HTTP 오류 [{task_resp.status_code}]: {task_resp.text[:300]}")
+        return None
+    except Exception as e:
+        print(f"[notify_clickup] Task 생성 예외: {e}")
+        return None
+
+    # ── Step 3: PDF 첨부 ───────────────────────────────────────────────
+    try:
+        attach_resp = requests.post(
+            f"https://api.clickup.com/api/v2/task/{task_id}/attachment",
+            headers={"Authorization": CLICKUP_TOKEN},
+            files={"attachment": (filename, pdf_bytes, "application/pdf")},
+            timeout=60, verify=False,
+        )
+        attach_resp.raise_for_status()
+        attach_id = attach_resp.json().get("id", "")
+        print(f"[notify_clickup] PDF 첨부 완료: {filename} (attachment_id={attach_id})")
+        return task_id
+    except requests.HTTPError:
+        print(f"[notify_clickup] PDF 첨부 HTTP 오류 [{attach_resp.status_code}]: {attach_resp.text[:300]}")
+        return None
+    except Exception as e:
+        print(f"[notify_clickup] PDF 첨부 예외: {e}")
         return None
