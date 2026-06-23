@@ -520,8 +520,9 @@ class DBManager:
             for s in mk_data.get("sectors", []):
                 records.append({
                     "date": date, "session": session, "category": f"{mk}_sectors",
-                    "ticker": s.get("sector", ""),
-                    "name":   s.get("sector"),
+                    "ticker":   s.get("sector", ""),
+                    "name":     s.get("sector"),
+                    "market":   s.get("sector"),        # 복원 시 sector 키로 매핑
                     "chg_pct":  s.get("chg_wmean") or s.get("chg_avg"),
                     "mktcap_b": s.get("mktcap_b"),
                     "volume":   s.get("n"),
@@ -563,6 +564,15 @@ class DBManager:
                 d.setdefault("sector", d["market"])
             return d
 
+        def _clean_ov_sectors(rec: dict) -> dict:
+            """Asia overseas 섹터 집계: sector/n/chg_avg/chg_wmean 키 복원."""
+            d = _clean_ov(rec)
+            d.setdefault("sector",   d.get("name") or d.get("ticker", ""))
+            d.setdefault("n",        d.get("volume"))
+            d.setdefault("chg_avg",  d.get("chg_pct"))
+            d.setdefault("chg_wmean", d.get("chg_pct"))
+            return d
+
         result: dict = {}
         overseas_asia: dict = {}
 
@@ -574,7 +584,8 @@ class DBManager:
                     sub = cat[len(f"{mk}_"):]   # major | featured | sectors | mktcap_top | tradeval_top
                     if mk not in overseas_asia:
                         overseas_asia[mk] = {}
-                    overseas_asia[mk][sub] = [_clean_ov(r) for r in items]
+                    cleaner = _clean_ov_sectors if sub == "sectors" else _clean_ov
+                    overseas_asia[mk][sub] = [cleaner(r) for r in items]
                     matched = True
                     break
             if matched:
@@ -777,7 +788,7 @@ class DBManager:
         return {
             "up": up, "down": down, "flat": flat, "total": total,
             "up_pct":       round(up / total * 100, 1) if total > 0 else None,
-            "adr":          round(up / (up + down) * 100, 1) if (up + down) > 0 else None,
+            "adr":          round(up / down * 100, 1) if down > 0 else None,
             "weighted_chg": round(
                 sum(c * tv for c, tv in zip(chg_list, tv_list)) / tv_sum, 2
             ) if tv_sum > 0 else None,
