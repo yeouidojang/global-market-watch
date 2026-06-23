@@ -5,7 +5,7 @@ SPX 구성종목 OHLCV 일별 수집 (yfinance)
   1. SPX_CSV_PATH 환경변수 또는 data/spx_constituents.csv (있는 경우)
   2. LSEG get_data(universe="0#.SPX")
   3. Wikipedia S&P 500 목록 (폴백)
-저장 대상: DB us_stocks_daily 테이블
+저장 대상: DB market_daily (session=us, category=stock)
 
 사용법:
     python exe/collect_us_stocks.py                        # 오늘
@@ -110,7 +110,7 @@ def load_spx_tickers() -> list[str]:
 
 def fetch_ohlcv(tickers: list[str], start: str, end: str) -> list[dict]:
     """
-    yfinance 배치 다운로드 → us_stocks_daily 삽입용 레코드 리스트.
+    yfinance 배치 다운로드 → market_daily 삽입용 레코드 리스트.
 
     Parameters
     ----------
@@ -149,8 +149,10 @@ def fetch_ohlcv(tickers: list[str], start: str, end: str) -> list[dict]:
                     continue
                 for dt, row in df.iterrows():
                     records.append({
-                        "date":   dt.strftime("%Y-%m-%d"),
-                        "ticker": t,
+                        "date":     dt.strftime("%Y-%m-%d"),
+                        "session":  "us",
+                        "category": "stock",
+                        "name":     t,
                         "open":   round(float(row["Open"]),   4) if pd.notna(row["Open"])   else None,
                         "high":   round(float(row["High"]),   4) if pd.notna(row["High"])   else None,
                         "low":    round(float(row["Low"]),    4) if pd.notna(row["Low"])    else None,
@@ -181,7 +183,7 @@ def run(start_date: str, end_date: str):
     records = [r for r in records if start_date <= r["date"] <= end_date]
 
     db = DBManager()
-    saved = db.upsert_us_stocks_daily(records)
+    saved = db.upsert_market_daily(records)
     dates = sorted({r["date"] for r in records})
     print(f"  → {len(records)}건 저장 (날짜 {len(dates)}일, upsert {saved}건)")
 

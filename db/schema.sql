@@ -107,19 +107,6 @@ CREATE TABLE IF NOT EXISTS earnings_calendar (
     UNIQUE (event_date, symbol)
 );
 
--- SPX 전 종목 일별 OHLCV (yfinance, ~504종목)
-CREATE TABLE IF NOT EXISTS us_stocks_daily (
-    date        TEXT NOT NULL,          -- YYYY-MM-DD
-    ticker      TEXT NOT NULL,          -- yfinance ticker (AAPL, NVDA, BRK-B 등)
-    open        REAL,
-    high        REAL,
-    low         REAL,
-    close       REAL,
-    volume      REAL,
-    created_at  TEXT DEFAULT (datetime('now','localtime')),
-    PRIMARY KEY (date, ticker)
-);
-
 -- 시장 휴장일 캘린더 (exchange_calendars 기반)
 CREATE TABLE IF NOT EXISTS market_holidays (
     date        TEXT NOT NULL,   -- YYYY-MM-DD
@@ -132,8 +119,6 @@ CREATE TABLE IF NOT EXISTS market_holidays (
 
 -- 인덱스
 CREATE INDEX IF NOT EXISTS idx_market_holidays_date ON market_holidays(date);
-CREATE INDEX IF NOT EXISTS idx_us_stocks_daily_date   ON us_stocks_daily(date);
-CREATE INDEX IF NOT EXISTS idx_us_stocks_daily_ticker ON us_stocks_daily(ticker);
 CREATE INDEX IF NOT EXISTS idx_market_daily_date   ON market_daily(date);
 CREATE INDEX IF NOT EXISTS idx_market_daily_name   ON market_daily(name);
 CREATE INDEX IF NOT EXISTS idx_market_daily_market ON market_daily(session, category, market, date);

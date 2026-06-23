@@ -47,17 +47,19 @@ def _get_finnhub_client():
 
 
 def _load_spx_symbols() -> set[str]:
-    """SPX 구성종목 ticker set. us_stocks_daily DB에서 로드."""
+    """SPX 구성종목 ticker set. market_daily(us/stock) DB에서 로드."""
     try:
         import sqlite3
         from pathlib import Path
         db_path = BASE_DIR / "db" / "market_watch.db"
         conn = sqlite3.connect(db_path)
-        rows = conn.execute("SELECT DISTINCT ticker FROM us_stocks_daily").fetchall()
+        rows = conn.execute(
+            "SELECT DISTINCT name FROM market_daily WHERE session='us' AND category='stock'"
+        ).fetchall()
         conn.close()
         symbols = {r[0] for r in rows if r[0]}
         if symbols:
-            print(f"  [SPX 유니버스] DB에서 {len(symbols)}개 로드 (us_stocks_daily)")
+            print(f"  [SPX 유니버스] DB에서 {len(symbols)}개 로드 (market_daily)")
             return symbols
     except Exception as e:
         print(f"  [SPX 유니버스 DB 로딩 실패] {e}")

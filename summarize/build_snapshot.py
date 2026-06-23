@@ -146,12 +146,12 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
 
         try:
             e_df = db.get_upcoming_earnings(week_start.isoformat(), days=span_days)
-            # us_stocks_daily에 저장된 SPX 유니버스로 필터링
+            # market_daily(us/stock)에 저장된 SPX 유니버스로 필터링
             if not e_df.empty:
                 try:
                     conn = db._connect()
                     spx_rows = conn.execute(
-                        "SELECT DISTINCT ticker FROM us_stocks_daily"
+                        "SELECT DISTINCT name FROM market_daily WHERE session='us' AND category='stock'"
                     ).fetchall()
                     conn.close()
                     spx_set = {r[0] for r in spx_rows}

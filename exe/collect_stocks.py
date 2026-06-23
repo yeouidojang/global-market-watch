@@ -1594,13 +1594,13 @@ def _ric_to_yf(ric: str) -> str | None:
 def _load_spx_universe() -> list[str]:
     """SPX 구성종목 yfinance ticker 목록.
 
-    us_stocks_daily DB 우선 → 없으면 collect_us_stocks.load_spx_tickers() 폴백.
+    market_daily(us/stock) DB 우선 → 없으면 collect_us_stocks.load_spx_tickers() 폴백.
     """
     try:
         from db.db_manager import DBManager
         conn = DBManager()._connect()
         rows = conn.execute(
-            "SELECT DISTINCT ticker FROM us_stocks_daily ORDER BY ticker"
+            "SELECT DISTINCT name FROM market_daily WHERE session='us' AND category='stock' ORDER BY name"
         ).fetchall()
         conn.close()
         tickers = [r[0] for r in rows]
