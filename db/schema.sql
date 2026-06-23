@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS market_daily (
     high        REAL,
     low         REAL,
     volume      REAL,
+    change_pct  REAL,                   -- 전일 대비 등락률 (%)
     created_at  TEXT DEFAULT (datetime('now','localtime')),
     PRIMARY KEY (date, name)
 );

@@ -55,10 +55,13 @@ class DBManager:
             """)
             conn.commit()
 
-        # market_daily.market 컬럼 추가 마이그레이션 (executescript 전에 실행)
+        # market_daily 컬럼 마이그레이션 (executescript 전에 실행)
         md_cols = [r[1] for r in conn.execute("PRAGMA table_info(market_daily)").fetchall()]
         if md_cols and "market" not in md_cols:
             conn.execute("ALTER TABLE market_daily ADD COLUMN market TEXT")
+            conn.commit()
+        if md_cols and "change_pct" not in md_cols:
+            conn.execute("ALTER TABLE market_daily ADD COLUMN change_pct REAL")
             conn.commit()
 
         conn.executescript(schema)
@@ -162,6 +165,27 @@ class DBManager:
         cursor = conn.executemany(sql, records)
         conn.commit()
         count = cursor.rowcount
+
+        # change_pct 재계산: 방금 upsert된 names에 대해 직전 종가 대비 등락률 update
+        names = list({r["name"] for r in records})
+        placeholders = ",".join("?" * len(names))
+        conn.execute(f"""
+            UPDATE market_daily
+            SET change_pct = (
+                SELECT ROUND((market_daily.close - prev.close) / ABS(prev.close) * 100, 4)
+                FROM market_daily AS prev
+                WHERE prev.name = market_daily.name
+                  AND prev.date < market_daily.date
+                  AND prev.close IS NOT NULL
+                  AND prev.close != 0
+                ORDER BY prev.date DESC
+                LIMIT 1
+            )
+            WHERE name IN ({placeholders})
+              AND close IS NOT NULL
+        """, names)
+        conn.commit()
+
         conn.close()
         return count
 
@@ -169,7 +193,7 @@ class DBManager:
         """지정 name 목록의 최근 n_days 데이터 반환."""
         placeholders = ",".join("?" * len(names))
         sql = f"""
-            SELECT date, session, category, name, close, open, high, low
+            SELECT date, session, category, name, close, open, high, low, change_pct
             FROM market_daily
             WHERE name IN ({placeholders})
             ORDER BY date DESC, name
@@ -183,7 +207,7 @@ class DBManager:
     def get_by_date(self, target_date: str) -> pd.DataFrame:
         """특정 날짜의 모든 market_daily 레코드 반환."""
         sql = """
-            SELECT date, session, category, name, close, open, high, low
+            SELECT date, session, category, name, close, open, high, low, change_pct
             FROM market_daily
             WHERE date = ?
             ORDER BY session, category, name
