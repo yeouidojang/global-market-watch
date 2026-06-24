@@ -68,7 +68,7 @@ def _run_us_breadth():
     import subprocess
     from pathlib import Path
 
-    script = Path("/home/quant/us-market-analysis/run_breadth.py")
+    script = Path("/home/quant/global-market-watch/us_breadth/run_breadth.py")
     python = Path("/home/quant/global-market-watch/.venv/bin/python")
 
     log.info("▶ US Breadth 분석 시작")
