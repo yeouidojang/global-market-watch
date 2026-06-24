@@ -255,10 +255,12 @@ def _fmt_stocks_europe(stocks_data: dict) -> str:
         return f"{v:{fmt}}%" if v is not None else "-"
 
     def _row_eu(s, note=""):
-        idx = s.get("index") or s.get("market") or "-"
-        dv  = f"{s['dollar_vol_b']:.2f}" if s.get("dollar_vol_b") else "-"
-        return (f"| {idx} | {s['ticker']} | {s['name'][:20]} | "
-                f"{s['close']:.2f} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
+        idx  = s.get("index") or s.get("market") or "-"
+        dv   = f"{s['dollar_vol_b']:.2f}" if s.get("dollar_vol_b") else "-"
+        cl   = s.get("close")
+        cl_s = f"{cl:.2f}" if cl is not None else "-"
+        return (f"| {idx} | {s['ticker']} | {s.get('name', s['ticker'])[:20]} | "
+                f"{cl_s} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
                 f"{_r(s.get('ret_1m'))} | {dv} | {note or s.get('signal', '')} |")
 
     if sectors:
@@ -329,32 +331,36 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
     # SPX 섹터 ETF
     if sectors:
         lines.append("\n**SPX 섹터 ETF 성과**")
-        lines.append("| 섹터 | ETF | 종가 | 1D% |")
-        lines.append("|------|-----|-----:|----:|")
+        lines.append("| 섹터 | ETF | 종가 | 1D% | 1W% | 1M% |")
+        lines.append("|------|-----|-----:|----:|----:|----:|")
         for s in sectors:
             chg = f"{s['chg_pct']:+.2f}%" if s.get("chg_pct") is not None else "-"
-            lines.append(f"| {s['name']} | {s['ticker']} | {s['close']:,.2f} | {chg} |")
+            r1w = f"{s['ret_1w']:+.2f}%" if s.get("ret_1w") is not None else "-"
+            r1m = f"{s['ret_1m']:+.2f}%" if s.get("ret_1m") is not None else "-"
+            lines.append(f"| {s['name']} | {s['ticker']} | {s['close']:,.2f} | {chg} | {r1w} | {r1m} |")
 
     # ════════════════════════════════════════
     # [US Main]
     # ════════════════════════════════════════
-    US_HDR = "| 분류 | Ticker | Name | Sector | 종가 | 1D% | 1W% | 1M% | 규모 | 비고 |"
-    US_SEP = "|------|--------|------|--------|-----:|----:|----:|----:|-----:|------|"
+    US_HDR = "| 분류 | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 시총(B) | 거래대금(B) | 비고 |"
+    US_SEP = "|------|--------|------|-----:|----:|----:|----:|--------:|-----------:|------|"
+    SG_HDR = "| 분류 | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 시총(B) | 거래대금(B) | 5일평균(B) | 변화율(%) | 비고 |"
+    SG_SEP = "|------|--------|------|-----:|----:|----:|----:|--------:|-----------:|-----------:|----------:|------|"
 
     # 시총+거래대금 상위
     us_major: list[str] = []
     for s in mktcap[:10]:
-        sec = (s.get("sector") or "-")[:16]
-        mc  = f"{s['mktcap_b']:.0f}B" if s.get("mktcap_b") else "-"
-        us_major.append(f"| 시총상위 | {s['ticker']} | {s.get('name', s['ticker'])[:18]} | {sec} | "
+        mc  = f"{s['mktcap_b']:.0f}" if s.get("mktcap_b") else "-"
+        dv  = f"{s['dollar_vol_b']:.1f}" if s.get("dollar_vol_b") else "-"
+        us_major.append(f"| 시총상위 | {s['ticker']} | {s.get('name', s['ticker'])[:18]} | "
                         f"{s['close']:.2f} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
-                        f"{_r(s.get('ret_1m'))} | {mc} |  |")
+                        f"{_r(s.get('ret_1m'))} | {mc} | {dv} |  |")
     for s in tradeval[:10]:
-        sec = (s.get("sector") or "-")[:16]
-        dv  = f"{s['dollar_vol_b']:.1f}B" if s.get("dollar_vol_b") else "-"
-        us_major.append(f"| 거래대금상위 | {s['ticker']} | {s.get('name', s['ticker'])[:18]} | {sec} | "
+        mc  = f"{s['mktcap_b']:.0f}" if s.get("mktcap_b") else "-"
+        dv  = f"{s['dollar_vol_b']:.1f}" if s.get("dollar_vol_b") else "-"
+        us_major.append(f"| 거래대금상위 | {s['ticker']} | {s.get('name', s['ticker'])[:18]} | "
                         f"{s['close']:.2f} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
-                        f"{_r(s.get('ret_1m'))} | {dv} |  |")
+                        f"{_r(s.get('ret_1m'))} | {mc} | {dv} |  |")
     if us_major:
         lines.append("\n## [US] 시총+거래대금 상위")
         lines.append(US_HDR); lines.append(US_SEP); lines.extend(us_major)
@@ -362,29 +368,30 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
     # 급등락+거래대금급증
     if surge:
         lines.append("\n## [US] 급등락+거래대금급증")
-        lines.append(US_HDR); lines.append(US_SEP)
-        for s in surge:
-            sec = (s.get("sector") or "-")[:16]
-            sr  = f"{s['surge_ratio']:.1f}x" if s.get("surge_ratio") else "-"
-            lines.append(f"| 특징주 | {s['ticker']} | {s.get('name', s['ticker'])[:18]} | {sec} | "
+        lines.append(SG_HDR); lines.append(SG_SEP)
+        for s in surge[:10]:
+            mc   = f"{s['mktcap_b']:.0f}" if s.get("mktcap_b") else "-"
+            dv   = f"{s['dollar_vol_b']:.2f}" if s.get("dollar_vol_b") else "-"
+            avg5 = f"{s['avg_dvol_b']:.2f}" if s.get("avg_dvol_b") else "-"
+            tvc  = f"{s['tv_chg_pct']:+.1f}" if s.get("tv_chg_pct") is not None else "-"
+            lines.append(f"| 특징주 | {s['ticker']} | {s.get('name', s['ticker'])[:18]} | "
                          f"{s['close']:.2f} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
-                         f"{_r(s.get('ret_1m'))} | {sr} | {s.get('signal','')} |")
+                         f"{_r(s.get('ret_1m'))} | {mc} | {dv} | {avg5} | {tvc} |  |")
 
     # EPS Revision
     if eps_rev:
         lines.append("\n## [US] EPS Revision")
-        lines.append("| 분류 | Ticker | Name | Sector | 1D% | 1W% | 1M% | EPS변화(1W) | EPS변화(1M) | 비고 |")
-        lines.append("|------|--------|------|--------|----:|----:|----:|------------:|------------:|------|")
+        lines.append("| 분류 | Ticker | Name | 1D% | 1W% | 1M% | EPS변화(1M) | EPS변화(3M) | 비고 |")
+        lines.append("|------|--------|------|----:|----:|----:|------------:|------------:|------|")
         for s in eps_rev:
             chg = _r(s.get("chg_pct"))
             r1w = (_r(s.get("ret_1w")) if s.get("ret_1w") is not None else
                    (_r(s.get("return_7d")) if s.get("return_7d") is not None else "-"))
             r1m = _r(s.get("ret_1m"))
-            e1w = f"{s['eps_chg_1w']:+.2f}%" if s.get("eps_chg_1w") is not None else "-"
             e1m = f"{s['eps_chg_1m']:+.2f}%" if s.get("eps_chg_1m") is not None else "-"
-            sec = (s.get("sector") or "-")[:16]
-            lines.append(f"| EPS | {s['ticker']} | {s.get('name', s['ticker'])[:18]} | {sec} | "
-                         f"{chg} | {r1w} | {r1m} | {e1w} | {e1m} |  |")
+            e3m = f"{s['eps_chg_3m']:+.2f}%" if s.get("eps_chg_3m") is not None else "-"
+            lines.append(f"| EPS | {s['ticker']} | {s.get('name', s['ticker'])[:18]} | "
+                         f"{chg} | {r1w} | {r1m} | {e1m} | {e3m} |  |")
 
     # ════════════════════════════════════════
     # [Sub] DAX·FTSE·CAC
@@ -396,14 +403,19 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
         eu_tradeval = europe.get("tradeval_top", [])
         eu_surge    = europe.get("turnover_surge", [])
 
-        EU_HDR = "| 분류(지수) | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 거래대금(B) | 비고 |"
-        EU_SEP = "|-----------|--------|------|-----:|----:|----:|----:|-----------:|------|"
+        EU_HDR = "| 분류(지수) | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 시총(B) | 거래대금(B) | 5D평균(B) | 변화율(%) | 비고 |"
+        EU_SEP = "|-----------|--------|------|-----:|----:|----:|----:|--------:|-----------:|----------:|----------:|------|"
 
         def _row_eu(div, s, note=""):
-            dv = f"{s['dollar_vol_b']:.2f}" if s.get("dollar_vol_b") else "-"
-            return (f"| {div} | {s['ticker']} | {s['name'][:20]} | "
-                    f"{s['close']:.2f} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
-                    f"{_r(s.get('ret_1m'))} | {dv} | {note or s.get('signal', '')} |")
+            mc   = f"{s['mktcap_b']:.1f}"    if s.get("mktcap_b")    else "-"
+            dv   = f"{s['dollar_vol_b']:.2f}" if s.get("dollar_vol_b") else "-"
+            avg5 = f"{s['avg_dvol_b']:.2f}"   if s.get("avg_dvol_b")   else "-"
+            tvc  = f"{s['tv_chg_pct']:+.1f}"  if s.get("tv_chg_pct") is not None else "-"
+            cl   = s.get("close")
+            cl_s = f"{cl:.2f}" if cl is not None else "-"
+            return (f"| {div} | {s['ticker']} | {s.get('name', s['ticker'])[:20]} | "
+                    f"{cl_s} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
+                    f"{_r(s.get('ret_1m'))} | {mc} | {dv} | {avg5} | {tvc} | {note or s.get('signal', '')} |")
 
         # 시장 폭 (전체 유럽 통합)
         if eu_breadth:
@@ -420,37 +432,32 @@ def _fmt_stocks_us(stocks_data: dict) -> str:
         # STOXX600 섹터 분석
         if eu_sectors:
             lines.append("\n## [Sub] STOXX600 섹터 분석")
-            lines.append("| 섹터 | 종가 | 1D% |")
-            lines.append("|------|-----:|----:|")
+            lines.append("| 섹터 | 종가 | 1D% | 1W% | 1M% |")
+            lines.append("|------|-----:|----:|----:|----:|")
             for s in eu_sectors:
                 chg = f"{s['chg_pct']:+.2f}%" if s.get("chg_pct") is not None else "-"
-                lines.append(f"| {s['name']} | {s['close']:,.2f} | {chg} |")
+                r1w = f"{s['ret_1w']:+.2f}%" if s.get("ret_1w") is not None else "-"
+                r1m = f"{s['ret_1m']:+.2f}%" if s.get("ret_1m") is not None else "-"
+                lines.append(f"| {s['name']} | {s['close']:,.2f} | {chg} | {r1w} | {r1m} |")
 
-        # 시총 상위
-        if eu_mktcap:
-            lines.append("\n## [Sub] 시총 상위 — DAX·FTSE100·CAC40")
+        # 시총·거래대금 상위 합산 (중복 제거, signal=시총상위/거래대금상위 → 비고)
+        if eu_mktcap or eu_tradeval:
+            lines.append("\n## [Sub] 시총·거래대금 상위 — DAX·FTSE100·CAC40")
             lines.append(EU_HDR); lines.append(EU_SEP)
-            for s in eu_mktcap:
-                idx = s.get("index") or s.get("market") or "-"
-                mc  = f"시총{s['mktcap_b']:.1f}B" if s.get("mktcap_b") else ""
-                lines.append(_row_eu(idx, s, mc))
+            _seen_eu: set = set()
+            for s in (eu_mktcap + eu_tradeval):
+                if s["ticker"] not in _seen_eu:
+                    idx = s.get("index") or s.get("market") or "-"
+                    lines.append(_row_eu(idx, s))
+                    _seen_eu.add(s["ticker"])
 
-        # 거래대금 상위
-        if eu_tradeval:
-            lines.append("\n## [Sub] 거래대금 상위 — DAX·FTSE100·CAC40")
-            lines.append(EU_HDR); lines.append(EU_SEP)
-            for s in eu_tradeval:
-                idx = s.get("index") or s.get("market") or "-"
-                lines.append(_row_eu(idx, s))
-
-        # 급등락+거래대금급증
+        # 급등락+거래대금급증 (비고는 LLM이 채움)
         if eu_surge:
             lines.append("\n## [Sub] 급등락+거래대금급증 — DAX·FTSE100·CAC40")
             lines.append(EU_HDR); lines.append(EU_SEP)
             for s in eu_surge:
                 idx = s.get("index") or s.get("market") or "-"
-                sr  = f"{s['surge_ratio']:.1f}x" if s.get("surge_ratio") else ""
-                lines.append(_row_eu(idx, s, sr))
+                lines.append(_row_eu(idx, {**s, "signal": ""}, ""))
 
     return "\n".join(lines)
 
@@ -474,36 +481,25 @@ def build_prompt(session: str, snapshot_text: str, stocks_data: dict = None) -> 
 ---
 
 ## 매크로
-(FX·금리·원자재·변동성을 아래 통합 표 형식으로 작성하세요.
-`| 분류 | 지표 | 종가 | 1D% | 1W% | 1M% | 비고 |` — 비고에 핵심 원인·시사점 1줄)
+⚠️ 스냅샷 [매크로] 섹션의 표를 **그대로 재현**하고 **비고** 컬럼에만 핵심 원인·시사점을 1줄 추가하세요.
+헤더·컬럼 수·순서·수치·단위를 절대 변경하지 마세요 (금리는 스냅샷에 bp로 이미 표기됨).
 
 ---
 
 ## 종목 분석
 
-### [한국 Main] KOSPI·KOSDAQ
-아래 두 표가 제공됩니다: **[한국] 시총+거래대금 상위** / **[한국] 특징주**.
-표 형식: `분류 | Ticker | Name | Sector | 종가 | 1D% | 1W% | 1M% | 거래대금 | Chg% | 비고`
-**비고** 컬럼에 상승/하락 원인·코멘트를 1줄로 작성하세요 (외인·기관 수급 반드시 포함).
-Chg%는 거래대금 전일대비 변화율입니다.
-분석 관점:
-  - KOSPI+KOSDAQ 시장 폭(ADR 20일 누적)으로 광범위 상승 vs 소수 집중 판단
-    (ADR ≥120% 과매수/광범위 강세 / 80~120% 중립 / <80% 과매도/광범위 약세)
-  - KOSPI vs KOSDAQ 강세 시장·자금 집중 방향
-  - 외인·기관 수급 동반 여부 (수급 있는 급등 vs 수급 없는 급등 구분)
-  - 급등락+거래대금급증 특징주의 테마 (반도체·전기차·금융·에너지 등)
-
-### [Sub] 일본·중국·홍콩
-아래 섹션별 표가 제공됩니다: **시장 폭** / **시총 상위** / **거래대금 상위** / **특징주** / **섹터 분석**.
-각 표에 일본→중국→홍콩 순으로 행이 정렬돼 있습니다.
-국가별로 분리해 분석하고, 강세/약세 섹터·대형주 방향성을 서술하세요.
-  - 각 국가의 시장 폭(상승비율·ADR 20일 누적)으로 광범위 상승 vs 소수 집중 판단
-    (ADR ≥120% 과매수/광범위 강세 / 80~120% 중립 / <80% 과매도/광범위 약세)
-  - 시총/거래대금 상위 대형주 수급·테마 식별
-  - 특징주 급등락 배경 및 테마 (반도체·전기차·금융·부동산 등)
-  - 해외 → 한국 전이 테마 명시적 연결
+⚠️ **표 재현 규칙 (반드시 준수)**: 아래 데이터 섹션에 완성된 마크다운 표가 제공됩니다.
+각 표를 한 글자도 바꾸지 말고 그대로 복사하고, **비고** 컬럼에만 1줄 코멘트를 추가하세요.
+필수 컬럼 체크리스트 (누락·추가·이름 변경 절대 금지):
+- [한국] 시총+거래대금 상위·특징주: `분류|Ticker|Name|Sector|종가|1D%|1W%|1M%|거래대금|Chg%|비고`
+- [해외 Sub]: `분류(국가/지수)|Ticker|Name|종가|1D%|1W%|1M%|거래대금|비고`
 
 {stocks}
+
+### 종목 분석 관점
+**[한국 Main]** 비고에 외인·기관 수급 반드시 포함 / KOSPI+KOSDAQ 시장 폭(ADR ≥120% 과매수·강세 / 80~120% 중립 / <80% 과매도·약세) / KOSPI vs KOSDAQ 자금 방향 / 급등락 특징주 테마
+
+**[Sub 일본·중국·홍콩]** 국가별 분리 분석 / 각국 시장 폭(ADR 기준 동일) / 시총·거래대금 상위 수급·테마 / 특징주 급등락 배경 / 해외 → 한국 전이 테마 명시
 
 ---
 
@@ -538,9 +534,15 @@ Chg%는 거래대금 전일대비 변화율입니다.
 ---
 
 ## 매크로
-(FX·금리·원자재·변동성을 `| 분류 | 지표 | 종가 | 1D% | 1W% | 1M% | 비고 |` 통합 표로 작성. 비고에 핵심 원인 1줄)
+⚠️ 스냅샷 [매크로] 섹션의 표를 **그대로 재현**하고 **비고** 컬럼에만 핵심 원인 1줄 추가.
+헤더·컬럼 수·순서·수치·단위를 절대 변경하지 마세요 (금리는 스냅샷에 bp로 이미 표기됨).
 
 ---
+
+⚠️ **표 재현 규칙 (반드시 준수)**: 아래 데이터 섹션에 완성된 마크다운 표가 제공됩니다.
+각 표를 한 글자도 바꾸지 말고 그대로 복사하고, **비고** 컬럼에만 1줄 코멘트를 추가하세요.
+필수 컬럼 체크리스트 (누락·추가·이름 변경 절대 금지):
+- 유럽 시총·거래대금·급등락: `분류(지수)|Ticker|Name|종가|1D%|1W%|1M%|시총(B)|거래대금(B)|5D평균(B)|변화율(%)|비고`
 
 {stocks}
 
@@ -582,38 +584,31 @@ Chg%는 거래대금 전일대비 변화율입니다.
 ---
 
 ## 매크로
-(`| 분류 | 지표 | 종가 | 1D% | 1W% | 1M% | 비고 |` 통합 표 형식으로 작성:
-- FX: DXY 반드시 첫 행 → EUR/USD·USD/JPY·USD/CNY·USD/KRW 순. 비고에 강달러 전환 여부 1줄
-- 금리: US 10Y·2Y·KR 3Y·JP 10Y
-- 원자재: WTI·Brent·Gold — 비고에 원인 1줄씩
-- 변동성: VIX·MOVE·VKOSPI)
+⚠️ 스냅샷 [매크로] 섹션의 표를 **그대로 재현**하고 **비고** 컬럼에만 핵심 원인 1줄 추가.
+헤더·컬럼 수·순서·수치·단위를 절대 변경하지 마세요 (금리는 스냅샷에 bp로 이미 표기됨).
+DXY를 FX 첫 행에 배치하고, FX→금리→원자재→변동성 순서를 유지하세요.
 
 ---
 
 ## 종목 분석
 
-### [US Main] SPX·NDX
-아래 표가 제공됩니다: **[US] 시총+거래대금 상위** / **[US] 급등락+거래대금급증** / **[US] EPS Revision**.
-표 형식: `분류 | Ticker | Name | Sector | 종가 | 1D% | 1W% | 1M% | 규모 | 비고`
-**비고** 컬럼에 상승/하락 원인·시그널·코멘트를 1줄로 작성하세요.
-분석 관점:
-  - S&P500 vs Nasdaq 강세 시장·자금 집중 방향
-  - 섹터 ETF 방향성으로 방어주 vs 성장주 vs 에너지 흐름 파악
-  - 거래대금 급증 특징주의 테마 (AI·반도체·전기차·바이오·은행·에너지 등)
-  - EPS Revision: 상향/하향 배경과 주가 반응 1줄
-
-{'### [Sub] DAX · FTSE100 · CAC40' if has_europe else ''}
-{'아래 섹션별 표가 제공됩니다: **[Sub] 시장 폭** / **[Sub] STOXX600 섹터 분석** / **[Sub] 시총 상위** / **[Sub] 거래대금 상위** / **[Sub] 급등락+거래대금급증**.' if has_europe else ''}
-{'종목표 형식: `분류(지수명) | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 거래대금(B) | 비고`' if has_europe else ''}
-{'지수별(DAX/FTSE100/CAC40)로 분리해 분석하고, 강세/약세 섹터·대형주 방향성을 서술하세요.' if has_europe else ''}
-{'분석 관점:' if has_europe else ''}
-{'  - 시장 폭(상승비율·ADR 20일 누적)으로 DAX/FTSE/CAC 광범위 상승 vs 소수 집중 판단 (ADR ≥120% 과매수/광범위 강세 / 80~120% 중립 / <80% 과매도/광범위 약세)' if has_europe else ''}
-{'  - STOXX600 섹터: 강세/약세 섹터 2~3개 집중 분석' if has_europe else ''}
-{'  - DAX/FTSE/CAC 지수별 시총·거래대금 상위 대형주 수급·방향성 구분' if has_europe else ''}
-{'  - 급등락 특징주 테마 (자동차·럭셔리·에너지·금융·헬스케어 등) 및 미국·아시아 전이 가능성' if has_europe else ''}
-{'  - 유럽 → 미국 전이 테마 명시적 연결' if has_europe else ''}
+⚠️ **표 재현 규칙 (반드시 준수)**: 아래 데이터 섹션에 완성된 마크다운 표가 제공됩니다.
+각 표를 한 글자도 바꾸지 말고 그대로 복사하고, **비고** 컬럼에만 1줄 코멘트를 추가하세요.
+필수 컬럼 체크리스트 (누락·추가·이름 변경 절대 금지):
+- SPX 섹터 ETF: `섹터|ETF|종가|1D%|1W%|1M%` (비고 없음)
+- STOXX600 섹터: `섹터|종가|1D%|1W%|1M%` (비고 없음)
+- [US] 시총+거래대금 상위: `분류|Ticker|Name|종가|1D%|1W%|1M%|시총(B)|거래대금(B)|비고`
+- [US] 급등락+거래대금급증: `분류|Ticker|Name|종가|1D%|1W%|1M%|시총(B)|거래대금(B)|5일평균(B)|변화율(%)|비고`
+- [US] EPS Revision: `분류|Ticker|Name|1D%|1W%|1M%|EPS변화(1M)|EPS변화(3M)|비고`
+- [Sub] 시총·거래대금 상위(합산): `분류(지수)|Ticker|Name|종가|1D%|1W%|1M%|시총(B)|거래대금(B)|5D평균(B)|변화율(%)|비고`
+- [Sub] 급등락+거래대금급증: `분류(지수)|Ticker|Name|종가|1D%|1W%|1M%|시총(B)|거래대금(B)|5D평균(B)|변화율(%)|비고`
 
 {{stocks}}
+
+### 종목 분석 관점
+**[US Main]** S&P500 vs Nasdaq 자금 집중 방향 / 섹터 ETF 방어주 vs 성장주 흐름 / 거래대금 급증 특징주 테마 (AI·반도체·전기차·바이오·은행) / EPS Revision 상향·하향 배경과 주가 반응
+
+{'**[Sub]** 시장 폭(상승비율·ADR 20일)으로 광범위 vs 소수 집중 판단 (ADR ≥120% 과매수·강세 / 80~120% 중립 / <80% 과매도·약세) / STOXX600 강세·약세 섹터 2~3개 집중 / DAX·FTSE·CAC 지수별 수급·방향성 / 급등락 특징주 테마 및 미국·아시아 전이 가능성' if has_europe else ''}
 
 ---
 

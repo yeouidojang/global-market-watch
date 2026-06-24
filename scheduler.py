@@ -59,6 +59,34 @@ def _run_asia():
     log.info(f"▶ ASIA 세션 완료")
 
 
+def _run_us_breadth():
+    """07:00 KST — US Market Breadth 분석 (S&P500 / NASDAQ-100 구성종목 지표).
+
+    global 파이프라인(06:10 KST)이 DB를 업데이트한 뒤 실행.
+    출력: /home/quant/us-market-analysis/output/us_breadth_YYYYMMDD.xlsx
+    """
+    import subprocess
+    from pathlib import Path
+
+    script = Path("/home/quant/us-market-analysis/run_breadth.py")
+    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+
+    log.info("▶ US Breadth 분석 시작")
+    try:
+        result = subprocess.run(
+            [str(python), str(script)],
+            capture_output=True, text=True, timeout=600,
+        )
+        if result.returncode == 0:
+            log.info(f"▶ US Breadth 분석 완료\n{result.stdout.strip()}")
+        else:
+            log.error(f"▶ US Breadth 분석 오류 (rc={result.returncode})\n{result.stderr.strip()}")
+    except subprocess.TimeoutExpired:
+        log.error("▶ US Breadth 분석 타임아웃 (600s)")
+    except Exception as e:
+        log.error(f"▶ US Breadth 분석 예외: {e}", exc_info=True)
+
+
 def _run_global():
     """06:10 KST — Europe + US 통합 파이프라인 단일 호출.
 
@@ -86,7 +114,7 @@ def main():
     parser.add_argument("--test", action="store_true",
                         help="즉시 1회 실행 후 종료")
     parser.add_argument("--session", default=None,
-                        choices=[None, "asia", "global", "all"],
+                        choices=[None, "asia", "global", "us_breadth", "all"],
                         help="--test 와 함께 사용 시 특정 세션만")
     args = parser.parse_args()
 
@@ -96,9 +124,12 @@ def main():
             _run_asia()
         elif target == "global":
             _run_global()
+        elif target == "us_breadth":
+            _run_us_breadth()
         else:  # all
             _run_asia()
             _run_global()
+            _run_us_breadth()
         return
 
     scheduler = BlockingScheduler(timezone=TIMEZONE)
@@ -119,10 +150,18 @@ def main():
         misfire_grace_time=600,
     )
 
+    # US Breadth 분석: 화~토 07:00 KST (global 파이프라인 완료 후)
+    scheduler.add_job(
+        _run_us_breadth, CronTrigger(hour=7, minute=0, day_of_week="tue-sat", timezone=TIMEZONE),
+        id="us_breadth",
+        name="US Market Breadth 분석",
+        misfire_grace_time=600,
+    )
+
     log.info("=" * 55)
     log.info("  Global Market Watch Scheduler 시작")
     log.info(f"  Timezone: {TIMEZONE}")
-    log.info("  트리거: 월~금 16:10 KST(아시아) / 화~토 06:10 KST(유럽+미국 통합)")
+    log.info("  트리거: 월~금 16:10 KST(아시아) / 화~토 06:10 KST(유럽+미국 통합) / 화~토 07:00 KST(US Breadth)")
     log.info("=" * 55)
 
     try:

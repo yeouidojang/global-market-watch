@@ -58,13 +58,16 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
     db    = DBManager()
 
     # 최근 35일 데이터 로드 (1D/1W/1M 변동률 계산용)
+    # stock/cn_stock/jp_stock/hk_stock 카테고리는 개별 종목 OHLCV → 스냅샷 불필요
+    SNAPSHOT_CATS = {"index", "fx", "rate", "commodity", "volatility", "sector"}
     all_names_df = db.get_latest_by_name()
     if all_names_df.empty:
         return {"date": today, "session": session, "indices": {}, "macro": {}, "econ_upcoming": []}
+    all_names_df = all_names_df[all_names_df["category"].isin(SNAPSHOT_CATS)]
 
     all_names = all_names_df["name"].tolist()
 
-    df = db.get_recent(all_names, n_days=35)
+    df = db.get_recent(all_names, n_days=50)
     if df.empty:
         return {"date": today, "session": session, "indices": {}, "macro": {}, "econ_upcoming": []}
 
@@ -125,6 +128,12 @@ def build_snapshot(session: str, target_date: str = None, stocks_data: dict = No
             "flag":     fl,
             "category": cat,
         }
+
+        # 금리 카테고리: bp(basis point) 변화값 추가 (수익률 차이 × 100)
+        if cat == "rate":
+            entry["chg_1d_bp"] = round((cur_val - prev_val) * 100, 1) if prev_val is not None else None
+            entry["chg_1w_bp"] = round((cur_val - val_1w)   * 100, 1) if val_1w   is not None else None
+            entry["chg_1m_bp"] = round((cur_val - val_1m)   * 100, 1) if val_1m   is not None else None
 
         if cat == "index":
             result_indices[name] = entry
@@ -206,14 +215,19 @@ def format_snapshot_text(snapshot: dict) -> str:
 
     if macro_rows:
         lines.append("\n[매크로]")
-        lines.append("| 분류 | 지표 | 종가 | 1D% | 1W% | 1M% |")
-        lines.append("|------|------|-----:|----:|----:|----:|")
+        lines.append("| 분류 | 지표 | 종가 | 1D | 1W | 1M |")
+        lines.append("|------|------|-----:|---:|---:|---:|")
         for label, name, v in macro_rows:
             close_s = f"{v['close']:.4f}" if v["close"] is not None else "N/A"
-            d1 = f"{v['chg_pct']:+.2f}%" if v.get("chg_pct") is not None else "-"
-            w1 = f"{v['chg_1w']:+.2f}%"  if v.get("chg_1w")  is not None else "-"
-            m1 = f"{v['chg_1m']:+.2f}%"  if v.get("chg_1m")  is not None else "-"
             fl = v.get("flag", "")
+            if v.get("category") == "rate":
+                d1 = f"{v['chg_1d_bp']:+.1f}bp" if v.get("chg_1d_bp") is not None else "-"
+                w1 = f"{v['chg_1w_bp']:+.1f}bp" if v.get("chg_1w_bp") is not None else "-"
+                m1 = f"{v['chg_1m_bp']:+.1f}bp" if v.get("chg_1m_bp") is not None else "-"
+            else:
+                d1 = f"{v['chg_pct']:+.2f}%" if v.get("chg_pct") is not None else "-"
+                w1 = f"{v['chg_1w']:+.2f}%"  if v.get("chg_1w")  is not None else "-"
+                m1 = f"{v['chg_1m']:+.2f}%"  if v.get("chg_1m")  is not None else "-"
             lines.append(f"| {label} | {name}{fl} | {close_s} | {d1} | {w1} | {m1} |")
 
     # 주요 종목 / 특징주

@@ -24,7 +24,7 @@ class DBManager:
         self._init_db()
 
     def _connect(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -44,16 +44,20 @@ class DBManager:
                 conn.execute("ALTER TABLE econ_calendar ADD COLUMN source_id TEXT")
                 conn.commit()
 
-            # UNIQUE INDEX 생성 전 중복 레코드 제거
-            conn.execute("""
-                DELETE FROM econ_calendar
-                WHERE id NOT IN (
-                    SELECT MIN(id)
-                    FROM econ_calendar
-                    GROUP BY event_date, country, indicator
-                )
-            """)
-            conn.commit()
+            # UNIQUE INDEX 생성 전 중복 레코드 제거 (인덱스가 없을 때만 1회 실행)
+            econ_unique_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_econ_unique'"
+            ).fetchone()
+            if not econ_unique_exists:
+                conn.execute("""
+                    DELETE FROM econ_calendar
+                    WHERE id NOT IN (
+                        SELECT MIN(id)
+                        FROM econ_calendar
+                        GROUP BY event_date, country, indicator
+                    )
+                """)
+                conn.commit()
 
         # market_daily 컬럼 마이그레이션 (executescript 전에 실행)
         md_cols = [r[1] for r in conn.execute("PRAGMA table_info(market_daily)").fetchall()]
@@ -78,8 +82,13 @@ class DBManager:
             conn.execute("DROP TABLE us_stocks_daily")
             conn.commit()
 
-        conn.executescript(schema)
-        conn.commit()
+        # executescript는 write lock 필요 → 이미 초기화된 경우 skip
+        sentinel = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_market_daily_market'"
+        ).fetchone()
+        if not sentinel:
+            conn.executescript(schema)
+            conn.commit()
 
         # briefings UNIQUE(date, session) 마이그레이션
         # — 기존 DB에 UNIQUE 제약이 없는 경우, 중복 제거 후 unique index 생성
@@ -102,11 +111,14 @@ class DBManager:
         # eps_cache JSON → DB 마이그레이션 (최초 1회)
         self._migrate_eps_cache_json(conn)
 
-        # eps_chg_1m, foreign_net, inst_net 컬럼 추가 마이그레이션
+        # eps_chg_1m, eps_chg_3m, foreign_net, inst_net 컬럼 추가 마이그레이션
         for table in ("eps_cache", "stocks_daily"):
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
             if cols and "eps_chg_1m" not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN eps_chg_1m REAL")
+                conn.commit()
+            if cols and "eps_chg_3m" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN eps_chg_3m REAL")
                 conn.commit()
         for col in ("foreign_net", "inst_net"):
             cols = [r[1] for r in conn.execute("PRAGMA table_info(stocks_daily)").fetchall()]
@@ -489,6 +501,7 @@ class DBManager:
                     "date": date, "session": session, "category": "sectors",
                     "ticker": s.get("ric", s.get("ticker", "")), "name": s.get("name"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                 })
             # 종목 스크리닝 (market = index 이름: DAX/FTSE/CAC)
             for cat in ("mktcap_top", "tradeval_top", "turnover_surge"):
@@ -502,6 +515,8 @@ class DBManager:
                         "dollar_vol_b": s.get("dollar_vol_b"),
                         "mktcap_b": s.get("mktcap_b"),
                         "surge_ratio": s.get("surge_ratio"),
+                        "avg_dvol_b": s.get("avg_dvol_b"),
+                        "tv_chg_pct": s.get("tv_chg_pct"),
                         "signal": s.get("signal"),
                     })
 
@@ -512,6 +527,7 @@ class DBManager:
                     "date": date, "session": session, "category": "sectors",
                     "ticker": s.get("ticker", ""), "name": s.get("name"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                 })
             for cat in ("mktcap_top", "tradeval_top", "turnover_surge", "eps_revision"):
                 for s in stocks_data.get(cat, []):
@@ -523,8 +539,10 @@ class DBManager:
                         "dollar_vol_b": s.get("dollar_vol_b"),
                         "mktcap_b": s.get("mktcap_b"),
                         "surge_ratio": s.get("surge_ratio"),
+                        "avg_dvol_b": s.get("avg_dvol_b"),
+                        "tv_chg_pct": s.get("tv_chg_pct"),
                         "eps_chg_1m": s.get("eps_chg_1m"),
-                        "eps_chg_1w": s.get("eps_chg_1w"),
+                        "eps_chg_3m": s.get("eps_chg_3m"),
                         "return_7d": s.get("return_7d"),
                         "signal": s.get("signal"),
                     })
@@ -645,7 +663,8 @@ class DBManager:
         "date", "session", "category", "ticker", "name", "market",
         "close", "chg_pct", "volume", "trade_val", "dollar_vol_b",
         "mktcap", "mktcap_b", "turnover", "surge_ratio",
-        "eps_chg_1m", "eps_chg_1w", "return_7d",
+        "avg_dvol_b", "tv_chg_pct",
+        "eps_chg_1m", "eps_chg_3m", "return_7d",
         "ret_1w", "ret_1m",
         "foreign_net", "inst_net", "signal",
     )
@@ -673,14 +692,16 @@ class DBManager:
                 (date, session, category, ticker, name, market,
                  close, chg_pct, volume, trade_val, dollar_vol_b,
                  mktcap, mktcap_b, turnover, surge_ratio,
-                 eps_chg_1m, eps_chg_1w, return_7d,
+                 avg_dvol_b, tv_chg_pct,
+                 eps_chg_1m, eps_chg_3m, return_7d,
                  ret_1w, ret_1m,
                  foreign_net, inst_net, signal)
             VALUES
                 (:date, :session, :category, :ticker, :name, :market,
                  :close, :chg_pct, :volume, :trade_val, :dollar_vol_b,
                  :mktcap, :mktcap_b, :turnover, :surge_ratio,
-                 :eps_chg_1m, :eps_chg_1w, :return_7d,
+                 :avg_dvol_b, :tv_chg_pct,
+                 :eps_chg_1m, :eps_chg_3m, :return_7d,
                  :ret_1w, :ret_1m,
                  :foreign_net, :inst_net, :signal)
             ON CONFLICT(date, session, category, ticker) DO UPDATE SET
@@ -694,8 +715,10 @@ class DBManager:
                 mktcap_b     = COALESCE(excluded.mktcap_b,     mktcap_b),
                 turnover     = COALESCE(excluded.turnover,     turnover),
                 surge_ratio  = COALESCE(excluded.surge_ratio,  surge_ratio),
+                avg_dvol_b   = COALESCE(excluded.avg_dvol_b,   avg_dvol_b),
+                tv_chg_pct   = COALESCE(excluded.tv_chg_pct,   tv_chg_pct),
                 eps_chg_1m   = COALESCE(excluded.eps_chg_1m,   eps_chg_1m),
-                eps_chg_1w   = COALESCE(excluded.eps_chg_1w,   eps_chg_1w),
+                eps_chg_3m   = COALESCE(excluded.eps_chg_3m,   eps_chg_3m),
                 return_7d    = COALESCE(excluded.return_7d,    return_7d),
                 ret_1w       = COALESCE(excluded.ret_1w,       ret_1w),
                 ret_1m       = COALESCE(excluded.ret_1m,       ret_1m),
@@ -740,19 +763,19 @@ class DBManager:
 
         Parameters
         ----------
-        records : list of dict  {ticker, eps_chg_1m, eps_chg_1w, fetched_date}
+        records : list of dict  {ticker, eps_chg_1m, eps_chg_3m, fetched_date}
         """
         if not records:
             return 0
         for r in records:
             r.setdefault("eps_chg_1m", None)
-            r.setdefault("eps_chg_1w", None)
+            r.setdefault("eps_chg_3m", None)
         sql = """
-            INSERT INTO eps_cache (ticker, eps_chg_1m, eps_chg_1w, fetched_date)
-            VALUES (:ticker, :eps_chg_1m, :eps_chg_1w, :fetched_date)
+            INSERT INTO eps_cache (ticker, eps_chg_1m, eps_chg_3m, fetched_date)
+            VALUES (:ticker, :eps_chg_1m, :eps_chg_3m, :fetched_date)
             ON CONFLICT(ticker) DO UPDATE SET
                 eps_chg_1m   = excluded.eps_chg_1m,
-                eps_chg_1w   = excluded.eps_chg_1w,
+                eps_chg_3m   = excluded.eps_chg_3m,
                 fetched_date = excluded.fetched_date,
                 created_at   = datetime('now','localtime')
         """
@@ -769,15 +792,15 @@ class DBManager:
 
         Returns
         -------
-        dict  {ticker: {eps_chg_1m, eps_chg_1w, fetched_date}}
+        dict  {ticker: {eps_chg_1m, eps_chg_3m, fetched_date}}
         """
-        sql = "SELECT ticker, eps_chg_1m, eps_chg_1w, fetched_date FROM eps_cache"
+        sql = "SELECT ticker, eps_chg_1m, eps_chg_3m, fetched_date FROM eps_cache"
         conn = self._connect()
         rows = conn.execute(sql).fetchall()
         conn.close()
         return {r["ticker"]: {
-                    "eps_chg_1m":  r["eps_chg_1m"],
-                    "eps_chg_1w":  r["eps_chg_1w"],
+                    "eps_chg_1m":   r["eps_chg_1m"],
+                    "eps_chg_3m":   r["eps_chg_3m"],
                     "fetched_date": r["fetched_date"],
                 } for r in rows}
 
@@ -787,27 +810,16 @@ class DBManager:
         당일 + 직전 거래일 종가 비교로 등락률 산출.
         """
         sql = """
-            SELECT t.name,
-                   t.close  AS close_today,
-                   p.close  AS close_prev,
-                   (t.close * COALESCE(t.volume, 0)) AS trade_val
-            FROM market_daily t
-            JOIN market_daily p
-              ON p.name = t.name
-             AND p.session  = :session
-             AND p.category = 'stock'
-             AND p.date = (
-                 SELECT MAX(m2.date) FROM market_daily m2
-                  WHERE m2.name = t.name
-                    AND m2.session  = :session
-                    AND m2.category = 'stock'
-                    AND m2.date < :date
-             )
-            WHERE t.date     = :date
-              AND t.session  = :session
-              AND t.category = 'stock'
-              AND t.close > 0
-              AND p.close > 0
+            SELECT name,
+                   close,
+                   change_pct,
+                   (close * COALESCE(volume, 0)) AS trade_val
+            FROM market_daily
+            WHERE date     = :date
+              AND session  = :session
+              AND category = 'stock'
+              AND close > 0
+              AND change_pct IS NOT NULL
         """
         conn = self._connect()
         rows = conn.execute(sql, {"date": date, "session": session}).fetchall()
@@ -815,8 +827,7 @@ class DBManager:
         if not rows:
             return {}
 
-        chg_list = [(r["close_today"] - r["close_prev"]) / abs(r["close_prev"]) * 100
-                    for r in rows]
+        chg_list = [r["change_pct"] for r in rows]
         tv_list  = [r["trade_val"] or 0 for r in rows]
         up    = sum(1 for c in chg_list if c > 0)
         down  = sum(1 for c in chg_list if c < 0)
