@@ -90,6 +90,20 @@ class DBManager:
             conn.executescript(schema)
             conn.commit()
 
+        # spx_constituents 테이블 마이그레이션 (sentinel 확정 이후 추가된 테이블 → 개별 생성 필요)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS spx_constituents (
+                ticker       TEXT NOT NULL,
+                fetched_date TEXT NOT NULL,
+                created_at   TEXT DEFAULT (datetime('now','localtime')),
+                PRIMARY KEY (ticker, fetched_date)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spx_constituents_date ON spx_constituents(fetched_date)"
+        )
+        conn.commit()
+
         # briefings UNIQUE(date, session) 마이그레이션
         # — 기존 DB에 UNIQUE 제약이 없는 경우, 중복 제거 후 unique index 생성
         idx_exists = conn.execute(
@@ -478,6 +492,8 @@ class DBManager:
                     "mktcap": s.get("mktcap"),
                     "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                     "turnover": s.get("turnover"),
+                    "surge_ratio": s.get("surge_ratio"),
+                    "tv_chg_pct": s.get("tv_chg"),
                     "foreign_net": s.get("foreign_net"),
                     "inst_net": s.get("inst_net"),
                     "signal": s.get("signal"),
@@ -561,6 +577,7 @@ class DBManager:
                         "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                         "mktcap_b": s.get("mktcap_b"),
                         "dollar_vol_b": s.get("trade_val_b"),
+                        "tv_chg_pct": s.get("tv_chg"),
                     })
             for s in mk_data.get("featured", []):
                 records.append({
@@ -571,6 +588,7 @@ class DBManager:
                     "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                     "surge_ratio": s.get("surge_ratio"),
                     "dollar_vol_b": s.get("trade_val_b"),
+                    "tv_chg_pct": s.get("tv_chg"),
                     "signal": s.get("signal"),
                 })
             for s in mk_data.get("sectors", []):
@@ -603,8 +621,12 @@ class DBManager:
         STRIP = ("id", "date", "session", "category", "created_at")
 
         def _clean(rec: dict) -> dict:
-            return {k: v for k, v in rec.items()
-                    if k not in STRIP and v is not None}
+            d = {k: v for k, v in rec.items()
+                 if k not in STRIP and v is not None}
+            # tv_chg_pct → tv_chg alias (briefing/formatting은 tv_chg 키 사용)
+            if "tv_chg_pct" in d:
+                d.setdefault("tv_chg", d["tv_chg_pct"])
+            return d
 
         def _clean_eu(rec: dict) -> dict:
             """Europe 종목: market 컬럼을 index 키로도 노출."""
@@ -803,6 +825,45 @@ class DBManager:
                     "eps_chg_3m":   r["eps_chg_3m"],
                     "fetched_date": r["fetched_date"],
                 } for r in rows}
+
+    # ------------------------------------------------------------------ #
+    #  spx_constituents
+    # ------------------------------------------------------------------ #
+    def upsert_spx_constituents(self, records: list[dict]) -> int:
+        """
+        SPX 구성종목 스냅샷 upsert.
+
+        Parameters
+        ----------
+        records : list of dict  {ticker, fetched_date}
+        """
+        if not records:
+            return 0
+        sql = """
+            INSERT INTO spx_constituents (ticker, fetched_date)
+            VALUES (:ticker, :fetched_date)
+            ON CONFLICT(ticker, fetched_date) DO UPDATE SET
+                created_at = datetime('now','localtime')
+        """
+        conn = self._connect()
+        cursor = conn.executemany(sql, records)
+        conn.commit()
+        count = cursor.rowcount
+        conn.close()
+        return count
+
+    def get_latest_spx_constituents(self) -> list[str]:
+        """가장 최근 fetched_date 스냅샷의 SPX 구성종목 티커 리스트 반환."""
+        conn = self._connect()
+        latest = conn.execute("SELECT MAX(fetched_date) AS d FROM spx_constituents").fetchone()["d"]
+        if not latest:
+            conn.close()
+            return []
+        rows = conn.execute(
+            "SELECT ticker FROM spx_constituents WHERE fetched_date = ? ORDER BY ticker", (latest,)
+        ).fetchall()
+        conn.close()
+        return [r["ticker"] for r in rows]
 
     def get_market_breadth(self, date: str, session: str) -> dict:
         """

@@ -107,6 +107,14 @@ CREATE TABLE IF NOT EXISTS earnings_calendar (
     UNIQUE (event_date, symbol)
 );
 
+-- S&P 500 구성종목 스냅샷 (LSEG Chain RIC 0#.SPX)
+CREATE TABLE IF NOT EXISTS spx_constituents (
+    ticker       TEXT NOT NULL,          -- yfinance ticker (BRK-B 등)
+    fetched_date TEXT NOT NULL,          -- 조회 기준일 YYYY-MM-DD
+    created_at   TEXT DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (ticker, fetched_date)
+);
+
 -- 시장 휴장일 캘린더 (exchange_calendars 기반)
 CREATE TABLE IF NOT EXISTS market_holidays (
     date        TEXT NOT NULL,   -- YYYY-MM-DD
@@ -131,3 +139,4 @@ CREATE INDEX IF NOT EXISTS idx_eps_cache_date    ON eps_cache(fetched_date);
 CREATE INDEX IF NOT EXISTS idx_stocks_daily_date ON stocks_daily(date, session);
 CREATE INDEX IF NOT EXISTS idx_earnings_cal_date   ON earnings_calendar(event_date);
 CREATE INDEX IF NOT EXISTS idx_earnings_cal_symbol ON earnings_calendar(symbol);
+CREATE INDEX IF NOT EXISTS idx_spx_constituents_date ON spx_constituents(fetched_date);

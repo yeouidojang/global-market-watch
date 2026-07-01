@@ -84,9 +84,17 @@ def _fetch_spx_tickers_lseg() -> list[str]:
 def load_spx_tickers() -> list[str]:
     """yfinance ticker 목록 반환.
 
-    우선순위: CSV → LSEG(0#.SPX)
+    우선순위: DB(spx_constituents) → CSV → LSEG(0#.SPX)
     LSEG 실패 시 Slack 알림 후 RuntimeError 발생.
     """
+    try:
+        db_tickers = DBManager().get_latest_spx_constituents()
+        if db_tickers:
+            print(f"[INFO] DB spx_constituents → {len(db_tickers)}개 종목")
+            return db_tickers
+    except Exception as e:
+        print(f"[WARN] DB spx_constituents 조회 실패: {e}")
+
     if SPX_CSV_PATH.exists():
         cols = pd.read_csv(SPX_CSV_PATH, nrows=0).columns.tolist()
         tickers = [_ric_to_yf(c) for c in cols if c.lower() != "date"]
@@ -94,7 +102,7 @@ def load_spx_tickers() -> list[str]:
         if tickers:
             return tickers
 
-    print("[INFO] SPX CSV 없음 → LSEG에서 SPX 구성종목 조회")
+    print("[INFO] SPX CSV/DB 없음 → LSEG에서 SPX 구성종목 조회")
     tickers = _fetch_spx_tickers_lseg()
     if tickers:
         return tickers
