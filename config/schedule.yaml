@@ -4,7 +4,7 @@
 triggers:
   asia_close:
     hour: 16
-    minute: 10
+    minute: 20
     label: "아시아 마감"
     session: asia
 

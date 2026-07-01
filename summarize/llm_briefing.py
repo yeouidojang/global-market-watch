@@ -112,9 +112,16 @@ def _fmt_stocks_asia(stocks_data: dict) -> str:
     overseas = stocks_data.get("overseas_asia", {})
     mk_pairs = (("jp", "일본"), ("cn", "중국"), ("hk", "홍콩"))
 
-    # ── 공통 row 포매터 ──────────────────────────────────────────────
-    HDR = "| 분류 | Ticker | Name | Sector | 종가 | 1D% | 1W% | 1M% | 거래대금 | Chg% | 비고 |"
-    SEP = "|------|--------|------|--------|-----:|----:|----:|----:|---------:|-----:|------|"
+    # ── row 포매터 ───────────────────────────────────────────────────
+    # 한국: 시총 컬럼 추가 (거래대금 앞)
+    KR_HDR = "| 분류 | Ticker | Name | 종가 | 1D% | 1W% | 1M% | 시총 | 거래대금 | TV5D% | 비고 |"
+    KR_SEP = "|------|--------|------|-----:|----:|----:|----:|------:|---------:|------:|------|"
+    # 해외 major: 시총+거래대금 통합표
+    OV_MAJ_HDR = "| 분류 | Ticker | Name | Sector | 종가 | 1D% | 1W% | 1M% | 시총(B) | 거래대금(B) | TV5D% | 비고 |"
+    OV_MAJ_SEP = "|------|--------|------|--------|-----:|----:|----:|----:|--------:|-----------:|------:|------|"
+    # 해외 featured: TV5D% 포함
+    OV_FEA_HDR = "| 분류 | Ticker | Name | Sector | 종가 | 1D% | 1W% | 1M% | 거래대금(B) | TV5D% | 비고 |"
+    OV_FEA_SEP = "|------|--------|------|--------|-----:|----:|----:|----:|-----------:|------:|------|"
 
     def _r(v, fmt="+.2f"):
         return f"{v:{fmt}}%" if v is not None else "-"
@@ -134,13 +141,23 @@ def _fmt_stocks_asia(stocks_data: dict) -> str:
         fn_s = f"외인{fn//100_000_000:+,}억" if fn is not None else ""
         it_s = f"기관{it//100_000_000:+,}억" if it is not None else ""
         note = " ".join(filter(None, [fn_s, it_s, sig]))
-        return (f"| {div} | {s['ticker']} | {s['name'][:18]} | - | "
+        mc_v = s.get("mktcap")
+        cap  = f"{mc_v/1e12:.1f}조" if mc_v and mc_v >= 1e12 else (f"{mc_v//100_000_000:,}억" if mc_v else "-")
+        # TV5D% = 이전 5D 평균 거래대금 대비 변화율
+        return (f"| {div} | {s['ticker']} | {s['name'][:12]} | "
                 f"{s['close']:,} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
-                f"{_r(s.get('ret_1m'))} | {_tv_kr(s)} | {_r(s.get('tv_chg'),'+.0f')} | {note} |")
+                f"{_r(s.get('ret_1m'))} | {cap} | {_tv_kr(s)} | {_r(s.get('tv_chg'),'+.0f')} | {note} |")
 
-    def _row_ov(div, s):
+    def _row_ov_major(div, s):
         sec = (s.get("sector") or s.get("market") or "-")[:14]
-        return (f"| {div} | {s['ticker']} | {s['name'][:18]} | {sec} | "
+        mc  = f"{s['mktcap_b']:.1f}B" if s.get("mktcap_b") is not None else "-"
+        return (f"| {div} | {s['ticker']} | {s['name'][:14]} | {sec} | "
+                f"{s['close']:.2f} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
+                f"{_r(s.get('ret_1m'))} | {mc} | {_tv_ov(s)} | {_r(s.get('tv_chg'),'+.0f')} |  |")
+
+    def _row_ov_feat(div, s):
+        sec = (s.get("sector") or s.get("market") or "-")[:14]
+        return (f"| {div} | {s['ticker']} | {s['name'][:14]} | {sec} | "
                 f"{s['close']:.2f} | {_r(s.get('chg_pct'))} | {_r(s.get('ret_1w'))} | "
                 f"{_r(s.get('ret_1m'))} | {_tv_ov(s)} | {_r(s.get('tv_chg'),'+.0f')} |  |")
 
@@ -159,7 +176,7 @@ def _fmt_stocks_asia(stocks_data: dict) -> str:
         for s in stocks_data.get("major", []): kr_major.append(_row_kr(s.get("market", "KR"), s))
     if kr_major:
         lines.append("\n## [한국] 시총+거래대금 상위 (KOSPI·KOSDAQ)")
-        lines.append(HDR); lines.append(SEP); lines.extend(kr_major)
+        lines.append(KR_HDR); lines.append(KR_SEP); lines.extend(kr_major)
 
     kr_feat: list[str] = []
     for s in stocks_data.get("featured_kospi",  []): kr_feat.append(_row_kr("KOSPI",  s))
@@ -168,7 +185,7 @@ def _fmt_stocks_asia(stocks_data: dict) -> str:
         for s in stocks_data.get("featured", []): kr_feat.append(_row_kr(s.get("market", "KR"), s))
     if kr_feat:
         lines.append("\n## [한국] 특징주 — 급등락+거래대금급증")
-        lines.append(HDR); lines.append(SEP); lines.extend(kr_feat)
+        lines.append(KR_HDR); lines.append(KR_SEP); lines.extend(kr_feat)
 
     # ════════════════════════════════════════
     # [Sub] 일본·중국·홍콩 — 섹션별 통합표
@@ -190,32 +207,23 @@ def _fmt_stocks_asia(stocks_data: dict) -> str:
         lines.append("|------|:---------:|------:|----:|----------------:|")
         lines.extend(brd_rows)
 
-    # 시총 상위
-    mc_rows: list[str] = []
+    # 시총+거래대금 상위 합산 (major 리스트 — 시총순위+거래대금순위 합산 스코어)
+    maj_rows: list[str] = []
     for mk, lbl in mk_pairs:
-        for s in overseas.get(mk, {}).get("mktcap_top", []):
-            mc_rows.append(_row_ov(lbl, s))
-    if mc_rows:
-        lines.append("\n## [Sub] 시총 상위 — 일본·중국·홍콩")
-        lines.append(HDR); lines.append(SEP); lines.extend(mc_rows)
+        for s in overseas.get(mk, {}).get("major", []):
+            maj_rows.append(_row_ov_major(lbl, s))
+    if maj_rows:
+        lines.append("\n## [Sub] 시총+거래대금 상위 — 일본·중국·홍콩")
+        lines.append(OV_MAJ_HDR); lines.append(OV_MAJ_SEP); lines.extend(maj_rows)
 
-    # 거래대금 상위
-    tv_rows: list[str] = []
-    for mk, lbl in mk_pairs:
-        for s in overseas.get(mk, {}).get("tradeval_top", []):
-            tv_rows.append(_row_ov(lbl, s))
-    if tv_rows:
-        lines.append("\n## [Sub] 거래대금 상위 — 일본·중국·홍콩")
-        lines.append(HDR); lines.append(SEP); lines.extend(tv_rows)
-
-    # 특징주
+    # 특징주 (TV5D% 포함)
     ov_feat: list[str] = []
     for mk, lbl in mk_pairs:
         for s in overseas.get(mk, {}).get("featured", []):
-            ov_feat.append(_row_ov(lbl, s))
+            ov_feat.append(_row_ov_feat(lbl, s))
     if ov_feat:
         lines.append("\n## [Sub] 특징주 — 일본·중국·홍콩")
-        lines.append(HDR); lines.append(SEP); lines.extend(ov_feat)
+        lines.append(OV_FEA_HDR); lines.append(OV_FEA_SEP); lines.extend(ov_feat)
 
     # 섹터 분석
     sec_rows: list[str] = []
@@ -491,8 +499,9 @@ def build_prompt(session: str, snapshot_text: str, stocks_data: dict = None) -> 
 ⚠️ **표 재현 규칙 (반드시 준수)**: 아래 데이터 섹션에 완성된 마크다운 표가 제공됩니다.
 각 표를 한 글자도 바꾸지 말고 그대로 복사하고, **비고** 컬럼에만 1줄 코멘트를 추가하세요.
 필수 컬럼 체크리스트 (누락·추가·이름 변경 절대 금지):
-- [한국] 시총+거래대금 상위·특징주: `분류|Ticker|Name|Sector|종가|1D%|1W%|1M%|거래대금|Chg%|비고`
-- [해외 Sub]: `분류(국가/지수)|Ticker|Name|종가|1D%|1W%|1M%|거래대금|비고`
+- [한국] 시총+거래대금 상위·특징주: `분류|Ticker|Name|종가|1D%|1W%|1M%|시총|거래대금|TV5D%|비고`
+- [해외 Sub] 시총+거래대금 상위: `분류|Ticker|Name|Sector|종가|1D%|1W%|1M%|시총(B)|거래대금(B)|TV5D%|비고`
+- [해외 Sub] 특징주: `분류|Ticker|Name|Sector|종가|1D%|1W%|1M%|거래대금(B)|TV5D%|비고`
 
 {stocks}
 
@@ -843,9 +852,10 @@ def generate_briefing(session: str, target_date: str = None,
 
     has_stocks = bool(stocks_data and any(stocks_data.get(k) for k in
                       ("major", "featured", "sectors", "top_stocks",
-                       "mktcap_top", "tradeval_top", "turnover_surge", "europe_stocks")))
-    # 운영 브리핑 길이 증가에 맞춰 세션 공통 출력 상한을 확장.
-    max_tok = 10000
+                       "mktcap_top", "tradeval_top", "turnover_surge", "europe_stocks",
+                       "overseas_asia", "major_kospi", "major_kosdaq")))
+    # Asia: 한국+해외 3개국 전체 종목 테이블로 출력이 크므로 별도 확장.
+    max_tok = 16000 if session == "asia" else 12000
     message = client.messages.create(
         model=MODEL,
         max_tokens=max_tok,
@@ -858,8 +868,18 @@ def generate_briefing(session: str, target_date: str = None,
     content       = message.content[0].text
     prompt_tokens = message.usage.input_tokens
     output_tokens = message.usage.output_tokens
+    stop_reason   = message.stop_reason
 
-    print(f"[llm_briefing] 완료: {prompt_tokens}+{output_tokens} tokens")
+    print(f"[llm_briefing] 완료: {prompt_tokens}+{output_tokens} tokens  stop={stop_reason}")
+    if stop_reason == "max_tokens":
+        warn_msg = (f"⚠️ *[{session.upper()} 브리핑 토큰 한도 초과]* {today}\n"
+                    f"출력이 {output_tokens}/{max_tok} 토큰에서 잘렸습니다. max_tokens 증가 필요.")
+        print(f"[llm_briefing][WARN] {warn_msg}")
+        try:
+            from summarize.notify_slack import send_ops
+            send_ops(warn_msg)
+        except Exception:
+            pass
 
     if save:
         db = DBManager()
