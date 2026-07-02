@@ -104,6 +104,38 @@ class DBManager:
         )
         conn.commit()
 
+        # eps_cache PK 확장: (ticker) → (ticker, fetched_date) — 주간(금요일) 히스토리 보관용.
+        # SQLite는 기존 테이블의 PK를 직접 바꿀 수 없어 재생성 후 데이터 이관한다.
+        eps_pk_cols = [r[1] for r in conn.execute("PRAGMA table_info(eps_cache)").fetchall() if r[5] > 0]
+        if eps_pk_cols == ["ticker"]:
+            conn.execute("ALTER TABLE eps_cache RENAME TO eps_cache_old")
+            conn.execute("""
+                CREATE TABLE eps_cache (
+                    ticker       TEXT NOT NULL,
+                    eps_chg_1m   REAL,
+                    eps_chg_1w   REAL,
+                    eps_chg_3m   REAL,
+                    fetched_date TEXT NOT NULL,
+                    created_at   TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (ticker, fetched_date)
+                )
+            """)
+            conn.execute("""
+                INSERT INTO eps_cache (ticker, eps_chg_1m, eps_chg_1w, eps_chg_3m, fetched_date, created_at)
+                SELECT ticker, eps_chg_1m, eps_chg_1w, eps_chg_3m, fetched_date, created_at FROM eps_cache_old
+            """)
+            conn.execute("DROP TABLE eps_cache_old")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_eps_cache_date ON eps_cache(fetched_date)")
+            conn.commit()
+            print("[db_manager] eps_cache PK 확장 완료: (ticker) → (ticker, fetched_date)")
+
+        # eps_cache에 eps_mean_est(NTM 원본 추정치) 컬럼 추가
+        # — 1주/1개월/3개월 변화율을 주간 스냅샷 히스토리에서 파생 계산하기 위함
+        eps_cols = [r[1] for r in conn.execute("PRAGMA table_info(eps_cache)").fetchall()]
+        if eps_cols and "eps_mean_est" not in eps_cols:
+            conn.execute("ALTER TABLE eps_cache ADD COLUMN eps_mean_est REAL")
+            conn.commit()
+
         # briefings UNIQUE(date, session) 마이그레이션
         # — 기존 DB에 UNIQUE 제약이 없는 경우, 중복 제거 후 unique index 생성
         idx_exists = conn.execute(
@@ -785,20 +817,23 @@ class DBManager:
 
         Parameters
         ----------
-        records : list of dict  {ticker, eps_chg_1m, eps_chg_3m, fetched_date}
+        records : list of dict  {ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date}
         """
         if not records:
             return 0
         for r in records:
+            r.setdefault("eps_mean_est", None)
+            r.setdefault("eps_chg_1w", None)
             r.setdefault("eps_chg_1m", None)
             r.setdefault("eps_chg_3m", None)
         sql = """
-            INSERT INTO eps_cache (ticker, eps_chg_1m, eps_chg_3m, fetched_date)
-            VALUES (:ticker, :eps_chg_1m, :eps_chg_3m, :fetched_date)
-            ON CONFLICT(ticker) DO UPDATE SET
+            INSERT INTO eps_cache (ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date)
+            VALUES (:ticker, :eps_mean_est, :eps_chg_1w, :eps_chg_1m, :eps_chg_3m, :fetched_date)
+            ON CONFLICT(ticker, fetched_date) DO UPDATE SET
+                eps_mean_est = excluded.eps_mean_est,
+                eps_chg_1w   = excluded.eps_chg_1w,
                 eps_chg_1m   = excluded.eps_chg_1m,
                 eps_chg_3m   = excluded.eps_chg_3m,
-                fetched_date = excluded.fetched_date,
                 created_at   = datetime('now','localtime')
         """
         conn = self._connect()
@@ -810,21 +845,64 @@ class DBManager:
 
     def get_eps_cache(self) -> dict:
         """
-        전체 EPS 캐시 반환.
+        가장 최근 fetched_date 스냅샷의 EPS 캐시 반환 (기존 호출부 호환용).
 
         Returns
         -------
-        dict  {ticker: {eps_chg_1m, eps_chg_3m, fetched_date}}
+        dict  {ticker: {eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date}}
         """
-        sql = "SELECT ticker, eps_chg_1m, eps_chg_3m, fetched_date FROM eps_cache"
+        sql = """
+            SELECT ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date
+            FROM   eps_cache
+            WHERE  fetched_date = (SELECT MAX(fetched_date) FROM eps_cache)
+        """
         conn = self._connect()
         rows = conn.execute(sql).fetchall()
         conn.close()
         return {r["ticker"]: {
+                    "eps_mean_est": r["eps_mean_est"],
+                    "eps_chg_1w":   r["eps_chg_1w"],
                     "eps_chg_1m":   r["eps_chg_1m"],
                     "eps_chg_3m":   r["eps_chg_3m"],
                     "fetched_date": r["fetched_date"],
                 } for r in rows}
+
+    def get_eps_estimates_at(self, fetched_date: str) -> dict:
+        """특정 스냅샷 날짜의 {ticker: eps_mean_est} 반환 (N주 전 값 조회용)."""
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT ticker, eps_mean_est FROM eps_cache WHERE fetched_date = ?",
+            (fetched_date,),
+        ).fetchall()
+        conn.close()
+        return {r["ticker"]: r["eps_mean_est"] for r in rows if r["eps_mean_est"] is not None}
+
+    def get_eps_cache_history(self, fetched_date: str = None) -> pd.DataFrame:
+        """
+        EPS 캐시 히스토리 조회.
+
+        Parameters
+        ----------
+        fetched_date : 특정 스냅샷 날짜만 조회 (None이면 전체 히스토리)
+
+        Returns
+        -------
+        pd.DataFrame  [ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date]
+        """
+        cols = "ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date"
+        conn = self._connect()
+        if fetched_date:
+            df = pd.read_sql_query(
+                f"SELECT {cols} FROM eps_cache WHERE fetched_date = ? ORDER BY ticker",
+                conn, params=(fetched_date,),
+            )
+        else:
+            df = pd.read_sql_query(
+                f"SELECT {cols} FROM eps_cache ORDER BY fetched_date, ticker",
+                conn,
+            )
+        conn.close()
+        return df
 
     # ------------------------------------------------------------------ #
     #  spx_constituents

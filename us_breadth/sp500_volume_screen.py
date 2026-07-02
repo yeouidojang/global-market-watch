@@ -3,7 +3,8 @@ S&P 500 거래대금 급증 + 가격 모멘텀 + EPS 상향 스크리닝
 ─────────────────────────────────────────────────────────
 필터 3단계:
   1) 거래대금  : 최근 5거래일 평균 > 직전 4주(20거래일) 평균  (vol_ratio > 1.0)
-  2) 가격 흐름 : 5일 수익률 > 0  AND  현재가 > MA20
+  2) 가격 흐름 : 1주 수익률 > 0  AND  현재가 > MA20
+  (1주/1개월/YTD 수익률은 참고용 컬럼으로 함께 출력, 필터/점수는 1주 수익률만 사용)
   3) EPS 상향  : eps_chg_1m > 0  (최근 1개월 이익추정치 상향)
 
 출력: us-market-analysis/output/sp500_screen_YYYYMMDD.xlsx
@@ -106,9 +107,11 @@ def load_ohlcv(tickers: list[str], n_days: int = LOAD_DAYS) -> pd.DataFrame:
 
 # ── 3. EPS 추정치 로드 ────────────────────────────────────────────────────────
 def load_eps_cache() -> pd.DataFrame:
+    """eps_cache는 종목당 여러 주(금요일)의 스냅샷을 보관 — 가장 최근 스냅샷만 사용."""
     with sqlite3.connect(str(DB_PATH)) as conn:
         df = pd.read_sql_query(
-            "SELECT ticker, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date FROM eps_cache",
+            "SELECT ticker, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date FROM eps_cache "
+            "WHERE fetched_date = (SELECT MAX(fetched_date) FROM eps_cache)",
             conn,
         )
     print(f"[EPS] eps_cache → {len(df)}개 종목 (최신: {df['fetched_date'].max()})")
@@ -150,6 +153,7 @@ def calc_metrics(df: pd.DataFrame) -> pd.DataFrame:
         vol_ratio = avg_recent / avg_prior
 
         # 가격 모멘텀
+        ret_1d  = (closes[-1] / closes[-2]  - 1) * 100 if len(closes) >= 2  else None
         ret_5d  = (closes[-1] / closes[-6]  - 1) * 100 if len(closes) >= 6  else None
         ret_20d = (closes[-1] / closes[-21] - 1) * 100 if len(closes) >= 21 else None
         ma20    = closes[-20:].mean() if len(closes) >= 20 else None
@@ -162,12 +166,41 @@ def calc_metrics(df: pd.DataFrame) -> pd.DataFrame:
             "최근5일_평균거래대금($M)": round(avg_recent / 1e6, 2),
             "직전4주_평균거래대금($M)": round(avg_prior  / 1e6, 2),
             "거래대금_비율":      round(vol_ratio, 2),
-            "5일수익률(%)":       round(ret_5d,   2) if ret_5d   is not None else None,
-            "20일수익률(%)":      round(ret_20d,  2) if ret_20d  is not None else None,
+            "1일_수익률(%)":      round(ret_1d,   2) if ret_1d   is not None else None,
+            "1주_수익률(%)":      round(ret_5d,   2) if ret_5d   is not None else None,
+            "1개월_수익률(%)":    round(ret_20d,  2) if ret_20d  is not None else None,
             "MA20_이격도(%)":     round(ma20_dev, 2) if ma20_dev is not None else None,
         })
 
     return pd.DataFrame(rows)
+
+
+# ── 4-1. YTD 수익률 (경량 로드) ─────────────────────────────────────────────────
+def load_ytd_returns(tickers: list[str], cur_price: dict[str, float], date_str: str) -> dict[str, float]:
+    """해당 연도 1/1 이후 종가만 로드해 YTD 수익률(%) 계산. (메인 OHLCV 윈도우와 별도)"""
+    year_start = f"{pd.Timestamp(date_str).year}-01-01"
+    placeholders = ",".join("?" * len(tickers))
+    sql = f"""
+        SELECT name AS ticker, date, close
+        FROM   market_daily
+        WHERE  session  = 'us'
+          AND  category = 'stock'
+          AND  name     IN ({placeholders})
+          AND  date     >= ?
+        ORDER  BY name, date
+    """
+    with sqlite3.connect(str(DB_PATH)) as conn:
+        df = pd.read_sql_query(sql, conn, params=tickers + [year_start])
+    if df.empty:
+        return {}
+
+    ytd = {}
+    for ticker, grp in df.groupby("ticker"):
+        base = grp.sort_values("date")["close"].iloc[0]
+        cur  = cur_price.get(ticker)
+        if base and cur is not None:
+            ytd[ticker] = round((cur - base) / base * 100, 2)
+    return ytd
 
 
 # ── 5. 필터 + 스코어링 ────────────────────────────────────────────────────────
@@ -195,7 +228,7 @@ def apply_filters(metrics: pd.DataFrame, eps: pd.DataFrame) -> tuple[pd.DataFram
 
     # 2단계: 가격 모멘텀
     price_ok = (
-        (candidates["5일수익률(%)"]  > 0) &
+        (candidates["1주_수익률(%)"]  > 0) &
         (candidates["MA20_이격도(%)"] > 0)
     )
 
@@ -211,7 +244,7 @@ def apply_filters(metrics: pd.DataFrame, eps: pd.DataFrame) -> tuple[pd.DataFram
     if not screened.empty:
         screened["종합점수"] = (
             pct_rank("거래대금_비율")   * 0.35 +
-            pct_rank("5일수익률(%)")    * 0.25 +
+            pct_rank("1주_수익률(%)")    * 0.25 +
             pct_rank("MA20_이격도(%)") * 0.15 +
             pct_rank("EPS_1달변화율(%)") * 0.25
         ).round(3)
@@ -259,7 +292,7 @@ def save_excel(
         {"항목": "최소 주가",            "값": f"${MIN_PRICE:.0f}"},
         {"항목": "최소 일평균거래대금",  "값": f"${MIN_DOLLARVOL/1e6:.0f}M"},
         {"항목": "거래대금 비율 조건",   "값": "> 1.0 (최근>직전)"},
-        {"항목": "가격 조건",            "값": "5일수익률>0 AND MA20_이격도>0"},
+        {"항목": "가격 조건",            "값": "1주수익률>0 AND MA20_이격도>0"},
         {"항목": "EPS 조건",             "값": "1달 EPS 변화율 > 0"},
         {"항목": "거래대금 급증 후보",   "값": len(candidates)},
         {"항목": "최종 통과 종목",       "값": len(screened)},
@@ -301,6 +334,12 @@ def run(date_str: str = TODAY) -> tuple[pd.DataFrame, Path]:
     metrics = calc_metrics(ohlcv)
     print(f"  유효 종목: {len(metrics)}개")
 
+    print("\n▶ YTD 수익률 계산")
+    cur_price_map = dict(zip(metrics["ticker"], metrics["현재가($)"]))
+    ytd_map = load_ytd_returns(list(cur_price_map.keys()), cur_price_map, date_str)
+    metrics["YTD_수익률(%)"] = metrics["ticker"].map(ytd_map)
+    print(f"  YTD 계산 완료: {len(ytd_map)}개")
+
     print("\n▶ 필터 적용")
     screened, candidates = apply_filters(metrics, eps)
 
@@ -318,7 +357,8 @@ def run(date_str: str = TODAY) -> tuple[pd.DataFrame, Path]:
         print("  — 해당 없음")
     else:
         cols = ["ticker", "종목명", "섹터", "거래대금_비율",
-                "5일수익률(%)", "MA20_이격도(%)", "EPS_1달변화율(%)", "종합점수"]
+                "1주_수익률(%)", "1개월_수익률(%)", "YTD_수익률(%)",
+                "MA20_이격도(%)", "EPS_1달변화율(%)", "종합점수"]
         avail = [c for c in cols if c in screened.columns]
         print(screened[avail].head(20).to_string(index=False))
 

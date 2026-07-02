@@ -192,11 +192,11 @@ def build_sector_summary(df: pd.DataFrame) -> pd.DataFrame:
         종목수              = ("ticker", "count"),
         EPS_3달평균        = ("EPS_3달변화율(%)", "mean"),
         EPS_1달평균        = ("EPS_1달변화율(%)", "mean"),
-        _5일수익률평균     = ("5일수익률(%)", "mean"),
+        _1주수익률평균     = ("1주_수익률(%)", "mean"),
         MA20이격도평균     = ("MA20_이격도(%)", "mean"),
         거래대금비율평균   = ("거래대금_비율", "mean"),
     ).round(2).reset_index()
-    summary.rename(columns={"_5일수익률평균": "5일수익률평균"}, inplace=True)
+    summary.rename(columns={"_1주수익률평균": "1주수익률평균"}, inplace=True)
     return summary.sort_values("EPS_3달평균", ascending=False)
 
 
@@ -277,7 +277,7 @@ def save_excel(
         "ticker", "종목명", "섹터", "세부업종",
         "현재가($)", "거래대금_비율",
         "최근5일_평균거래대금($M)", "직전4주_평균거래대금($M)",
-        "5일수익률(%)", "20일수익률(%)", "MA20_이격도(%)",
+        "1일_수익률(%)", "1주_수익률(%)", "1개월_수익률(%)", "YTD_수익률(%)", "MA20_이격도(%)",
         "EPS_1주변화율(%)", "EPS_1달변화율(%)", "EPS_3달변화율(%)",
         "종합점수",
         "EPS상향이유", "투자포인트", "주요리스크",

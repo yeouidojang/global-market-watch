@@ -307,6 +307,17 @@ def calc_metrics(df: pd.DataFrame) -> pd.DataFrame:
             ma = closes[-n:].mean()
             return round((cur - ma) / ma * 100, 2) if ma else None
 
+        def ret_n(n):
+            if len(closes) <= n:
+                return None
+            prev = closes[-n - 1]
+            return round((cur - prev) / prev * 100, 2) if prev else None
+
+        year_start = pd.Timestamp(year=grp["date"].iloc[-1].year, month=1, day=1)
+        ytd_rows   = grp.loc[grp["date"] >= year_start, "close"]
+        ytd_base   = ytd_rows.iloc[0] if not ytd_rows.empty else None
+        ytd_ret    = round((cur - ytd_base) / ytd_base * 100, 2) if ytd_base else None
+
         rows.append({
             "ticker":          ticker,
             "기준일":           cur_dt,
@@ -315,6 +326,10 @@ def calc_metrics(df: pd.DataFrame) -> pd.DataFrame:
             "250일_저가":       round(l250, 0),
             "고가대비(%)":      round((cur - h250) / h250 * 100, 2),
             "저가대비(%)":      round((cur - l250) / l250 * 100, 2),
+            "1일_수익률(%)":    ret_n(1),
+            "1주_수익률(%)":    ret_n(5),
+            "1개월_수익률(%)":  ret_n(21),
+            "YTD_수익률(%)":    ytd_ret,
             "MA20_이격도(%)":   ma_dev(20),
             "MA60_이격도(%)":   ma_dev(60),
             "MA120_이격도(%)":  ma_dev(120),
@@ -348,8 +363,8 @@ def attach_meta(
 # ── 10. 섹터 집계 ────────────────────────────────────────────────────────────
 
 def build_sector_summary(df: pd.DataFrame) -> pd.DataFrame:
-    metric_cols = ["고가대비(%)", "저가대비(%)", "MA20_이격도(%)", "MA60_이격도(%)",
-                   "MA120_이격도(%)", "MA250_이격도(%)"]
+    metric_cols = ["고가대비(%)", "저가대비(%)", "1주_수익률(%)", "1개월_수익률(%)", "YTD_수익률(%)",
+                   "MA20_이격도(%)", "MA60_이격도(%)", "MA120_이격도(%)", "MA250_이격도(%)"]
     rows = []
     for sector, grp in df.groupby("섹터"):
         row = {"섹터": sector, "종목수": len(grp)}

@@ -7,6 +7,7 @@ KOSPI+KOSDAQ 주요 종목 및 특징주 수집 (pykrx)
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -15,6 +16,8 @@ load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 import pandas as pd
+
+KST = timezone(timedelta(hours=9))
 
 from exe.collect_macro import _get_krx_session, _KRX_UA
 
@@ -1641,7 +1644,6 @@ def fetch_europe_stocks(target_date: str) -> dict:
 # ================================================================== #
 
 SPX_CSV_PATH = Path(os.environ.get("SPX_CSV_PATH", BASE_DIR / "data" / "spx_constituents_prices.csv"))
-EPS_CACHE_DAYS = 7
 
 # LSEG RIC suffix 제거 + 특수 케이스 처리
 _RIC_SPECIALS = {
@@ -1653,7 +1655,7 @@ _RIC_SPECIALS = {
 _YF_TO_RIC_BASE: dict[str, str] = {v: k for k, v in _RIC_SPECIALS.items() if v is not None}
 
 def _load_eps_cache() -> dict:
-    """DB에서 EPS 캐시 로드. {ticker: {eps_chg_1m, eps_chg_3m, fetched_date}}"""
+    """DB에서 EPS 캐시 로드. {ticker: {eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date}}"""
     try:
         from db.db_manager import DBManager
         return DBManager().get_eps_cache()
@@ -1662,7 +1664,7 @@ def _load_eps_cache() -> dict:
 
 
 def _save_eps_cache(records: list[dict]):
-    """DB에 EPS 캐시 저장. records: [{ticker, eps_chg_1m, eps_chg_3m, fetched_date}]"""
+    """DB에 EPS 캐시 저장. records: [{ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date}]"""
     try:
         from db.db_manager import DBManager
         DBManager().upsert_eps_cache(records)
@@ -1670,8 +1672,45 @@ def _save_eps_cache(records: list[dict]):
         print(f"    [eps cache save ERROR] {e}")
 
 
+def calc_eps_changes(target_date: str, estimates: dict[str, float]) -> dict[str, dict]:
+    """NTM EPS 원본 추정치 히스토리에서 1주/4주(1M)/12주(3M) 전 대비 변화율을 파생 계산.
+
+    Parameters
+    ----------
+    target_date : 이번 스냅샷 기준일 (금요일, YYYY-MM-DD)
+    estimates   : 이번 스냅샷의 {ticker: eps_mean_est}
+
+    Returns
+    -------
+    dict  {ticker: {eps_chg_1w, eps_chg_1m, eps_chg_3m}}
+    """
+    from db.db_manager import DBManager
+    db = DBManager()
+    td = pd.Timestamp(target_date)
+    windows = {"eps_chg_1w": 1, "eps_chg_1m": 4, "eps_chg_3m": 12}
+    baselines = {
+        key: db.get_eps_estimates_at((td - pd.Timedelta(weeks=n)).strftime("%Y-%m-%d"))
+        for key, n in windows.items()
+    }
+    result = {}
+    for ticker, cur in estimates.items():
+        if cur is None:
+            continue
+        row = {}
+        for key, base_map in baselines.items():
+            base = base_map.get(ticker)
+            row[key] = round((cur - base) / base * 100, 2) if base else None
+        result[ticker] = row
+    return result
+
+
 def _is_eps_cache_fresh(cache: dict, target_date: str) -> bool:
-    """캐시가 EPS_CACHE_DAYS 이내이고 3M 데이터가 존재하는지 확인."""
+    """EPS 캐시는 매주 금요일 종가 기준으로만 갱신한다 (획일화).
+
+    target_date(수집 대상 거래일)가 금요일이 아니면 직전 캐시를 그대로 사용.
+    금요일이면 이미 그 금요일 데이터로 갱신됐는지 확인하고, 아직이면
+    뉴욕 마감 데이터가 확정되는 KST 06:00 이후에만 재수집을 허용한다.
+    """
     if not cache:
         return False
     sample = next(iter(cache.values()), {})
@@ -1679,15 +1718,23 @@ def _is_eps_cache_fresh(cache: dict, target_date: str) -> bool:
     if not fetched:
         return False
     try:
-        delta = (pd.Timestamp(target_date) - pd.Timestamp(fetched)).days
-        if delta >= EPS_CACHE_DAYS:
-            return False
-        # eps_chg_3m이 전혀 없으면 WP 변경 후 재수집 필요
+        # eps_chg_3m이 캐시 전체에서 전혀 없으면 (스키마 변경 등) 재수집 필요 (요일 무관)
         has_3m = sum(1 for v in cache.values() if v.get("eps_chg_3m") is not None)
         if has_3m == 0:
             print(f"    [eps cache] eps_chg_3m 없음 → LSEG 3M 재수집")
             return False
-        return True
+
+        if pd.Timestamp(target_date).weekday() != 4:   # 4 = 금요일
+            return True
+
+        if fetched == target_date:
+            return True
+
+        if datetime.now(KST).hour < 6:
+            print(f"    [eps cache] 금요일 종가 확정 대기 (KST 06:00 이전) → 기존 캐시 유지")
+            return True
+
+        return False
     except Exception:
         return False
 
@@ -1760,10 +1807,12 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
                    target_date: str = None,
                    eps_universe: list[str] = None) -> dict[str, dict]:
     """
-    LSEG get_data로 시총 + EPS 추정치 변화 수집.
-    - TR.CompanyMarketCap : billion USD 단위 (mktcap_rics 대상)
-    - TR.MeanPctChg WP=30d: 30일 EPS 변화율 핵심 (eps_universe 전체)
-    - TR.MeanPctChg WP=7d : 7일 EPS 변화율 서브  (eps_universe 전체)
+    LSEG get_data로 시총 + EPS 추정치(NTM 원본값) 수집.
+    - TR.CompanyMarketCap  : billion USD 단위 (mktcap_rics 대상)
+    - TR.EPSMeanEstimate   : NTM EPS 평균 추정치 원본값 (eps_universe 전체)
+
+    1주/1개월/3개월 EPS 변화율은 이 원본값을 주간(금요일) 스냅샷으로 누적한 뒤
+    DB 히스토리에서 N주 전 값과 비교해 파생 계산한다 (calc_eps_changes 참고).
 
     Parameters
     ----------
@@ -1780,7 +1829,7 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
 
     # result는 mktcap + eps 전체 합집합
     all_tickers = list(dict.fromkeys(mktcap_cands + eps_cands))
-    result: dict[str, dict] = {t: {"mktcap_b": None, "eps_chg_1m": None, "eps_chg_3m": None,
+    result: dict[str, dict] = {t: {"mktcap_b": None, "eps_mean_est": None,
                                    "name": None, "sector": None}
                                for t in all_tickers}
     session_opened = False
@@ -1872,53 +1921,39 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
                     pass
                 time.sleep(0.2)
 
-        # ── EPS 추정치 배치 수집 (전체 eps_universe, batch_size=20, retry×2) ─
+        # ── EPS 추정치 원본값 배치 수집 (전체 eps_universe, batch_size=20, retry×2) ─
+        # TR.EPSMeanEstimate는 LSEG RIC 포맷(.O/.N)에서만 안정적으로 resolve됨
+        # (bare yfinance 티커는 다수가 "Unable to resolve" 실패 — 배치 내 일부만 우연히 성공)
         if fetch_eps:
-            print(f"    [LSEG eps] {len(eps_cands)}개 종목 1M+3M EPS 조회 중...")
-            eps_params_list = [
-                ("1m", {"EstimateMeasure": "EPS", "Period": "NTM", "WP": "30d",
-                        **({"Sdate": target_date} if target_date else {})}),
-                # WP='90d'는 LSEG RIC 포맷(.O/.N)에서만 동작 → 배치 변환 필요
-                ("3m", {"EstimateMeasure": "EPS", "Period": "NTM", "WP": "90d",
-                        **({"Sdate": target_date} if target_date else {})}),
-            ]
+            print(f"    [LSEG eps] {len(eps_cands)}개 종목 NTM EPS 추정치 조회 중...")
+            eps_params = {"Period": "NTM", **({"Sdate": target_date} if target_date else {})}
             eps_batch = 20
-            for label, params in eps_params_list:
-                field_key = f"eps_chg_{label}"
-                use_ric = (label == "3m")  # 3M은 LSEG RIC 포맷 필요
-                for i in range(0, len(eps_cands), eps_batch):
-                    batch_yf = eps_cands[i:i + eps_batch]
-                    if use_ric:
-                        # .O(NASDAQ) / .N(NYSE) 두 suffix 동시 시도
-                        batch = []
-                        for tk in batch_yf:
-                            base = _YF_TO_RIC_BASE.get(tk, tk)
-                            batch.extend([f"{base}.O", f"{base}.N"])
-                    else:
-                        batch = batch_yf
-                    for attempt in range(2):
-                        try:
-                            part = ld.get_data(
-                                universe=batch,
-                                fields="TR.MeanPctChg",
-                                parameters=params,
-                            )
-                            if part is not None and not part.empty:
-                                for _, row in part.iterrows():
-                                    ric = str(row.get("Instrument", "")).strip()
-                                    # 3M: RIC→yf 변환 ('AAPL.O'→'AAPL', 'BRKb.N'→'BRK-B')
-                                    ticker = _ric_to_yf(ric) if use_ric else ric
-                                    # `or` 미사용: 0.0이 falsy → None 오판 방지
-                                    val = row.get("Mean Estimate Pct Change")
-                                    if val is None:
-                                        val = row.get("Mean Pct Change")
-                                    if ticker and val is not None and pd.notna(val):
-                                        result.setdefault(ticker, {})[field_key] = round(float(val), 2)
-                            break
-                        except Exception as be:
-                            print(f"    [LSEG eps_{label} BATCH ERROR i={i} attempt={attempt+1}] {be}")
-                            if attempt == 0:
-                                time.sleep(3)
+            for i in range(0, len(eps_cands), eps_batch):
+                batch_yf = eps_cands[i:i + eps_batch]
+                # .O(NASDAQ) / .N(NYSE) 두 suffix 동시 시도
+                batch = []
+                for tk in batch_yf:
+                    base = _YF_TO_RIC_BASE.get(tk, tk)
+                    batch.extend([f"{base}.O", f"{base}.N"])
+                for attempt in range(2):
+                    try:
+                        part = ld.get_data(
+                            universe=batch,
+                            fields="TR.EPSMeanEstimate",
+                            parameters=eps_params,
+                        )
+                        if part is not None and not part.empty:
+                            for _, row in part.iterrows():
+                                ric = str(row.get("Instrument", "")).strip()
+                                ticker = _ric_to_yf(ric)   # RIC→yf 변환 ('AAPL.O'→'AAPL', 'BRKb.N'→'BRK-B')
+                                val = row.get("Earnings Per Share - Mean Estimate")
+                                if ticker and val is not None and pd.notna(val):
+                                    result.setdefault(ticker, {})["eps_mean_est"] = round(float(val), 4)
+                        break
+                    except Exception as be:
+                        print(f"    [LSEG eps BATCH ERROR i={i} attempt={attempt+1}] {be}")
+                        if attempt == 0:
+                            time.sleep(3)
 
     except Exception as e:
         print(f"    [LSEG screener ERROR] {e}")
@@ -2097,7 +2132,7 @@ def fetch_us_stocks(
     # 거래대금 상위 100개만 LSEG 조회 (전체 조회는 부하 과다)
     cands_by_dvol = sorted(stats.keys(), key=lambda t: stats[t]["dollar_vol"], reverse=True)[:100]
 
-    # EPS 주간 캐시 확인: 7일 이내 캐시가 있으면 LSEG EPS 호출 생략
+    # EPS 주간 캐시 확인: 금요일 종가 기준 캐시(KST 토요일 06:00 이후 갱신)가 있으면 LSEG EPS 호출 생략
     eps_cache = _load_eps_cache()
     cache_fresh = _is_eps_cache_fresh(eps_cache, target_date)
     if cache_fresh:
@@ -2117,16 +2152,25 @@ def fetch_us_stocks(
     if cache_fresh:
         for ticker in cands_by_dvol:
             if ticker in eps_cache:
+                lseg_meta.setdefault(ticker, {})["eps_chg_1w"] = eps_cache[ticker].get("eps_chg_1w")
                 lseg_meta.setdefault(ticker, {})["eps_chg_1m"] = eps_cache[ticker].get("eps_chg_1m")
                 lseg_meta.setdefault(ticker, {})["eps_chg_3m"] = eps_cache[ticker].get("eps_chg_3m")
     else:
-        # 새로 수집된 EPS 전체를 DB 캐시에 저장
-        new_records = [
-            {"ticker": t, "eps_chg_1m": meta.get("eps_chg_1m"),
-             "eps_chg_3m": meta.get("eps_chg_3m"), "fetched_date": target_date}
-            for t, meta in lseg_meta.items()
-            if meta.get("eps_chg_1m") is not None or meta.get("eps_chg_3m") is not None
-        ]
+        # 새로 수집된 NTM EPS 원본값 → 1주/4주/12주 전 스냅샷과 비교해 변화율 파생 계산 후 DB 저장
+        estimates = {t: meta.get("eps_mean_est") for t, meta in lseg_meta.items()
+                     if meta.get("eps_mean_est") is not None}
+        changes = calc_eps_changes(target_date, estimates)
+        new_records = []
+        for t, est in estimates.items():
+            chg = changes.get(t, {})
+            new_records.append({
+                "ticker": t, "eps_mean_est": est,
+                "eps_chg_1w": chg.get("eps_chg_1w"),
+                "eps_chg_1m": chg.get("eps_chg_1m"),
+                "eps_chg_3m": chg.get("eps_chg_3m"),
+                "fetched_date": target_date,
+            })
+            lseg_meta.setdefault(t, {}).update(chg)
         if new_records:
             _save_eps_cache(new_records)
             print(f"    [eps cache] {len(new_records)}개 종목 DB 저장 (전체 유니버스)")

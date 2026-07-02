@@ -79,14 +79,18 @@ CREATE TABLE IF NOT EXISTS stocks_daily (
     UNIQUE (date, session, category, ticker)
 );
 
--- EPS 추정치 주간 캐시 (LSEG TR.MeanPctChg, 7일 단위 수집)
+-- EPS 추정치 주간 히스토리 (LSEG TR.EPSMeanEstimate, 매주 금요일 종가 기준 갱신 — KST 토요일 06:00 이후)
+-- eps_mean_est(NTM 원본값)를 주간 스냅샷으로 쌓고, 1주/1개월/3개월 변화율은
+-- 1/4/12주 전 스냅샷과 비교해 파생 계산한다 (exe/collect_stocks.py calc_eps_changes).
 CREATE TABLE IF NOT EXISTS eps_cache (
     ticker       TEXT NOT NULL,          -- yfinance ticker (AAPL, NVDA 등)
-    eps_chg_1m   REAL,                   -- 30일 EPS 추정치 변화율 (%) ← 핵심
-    eps_chg_1w   REAL,                   -- 7일 EPS 추정치 변화율 (%)  ← 서브
-    fetched_date TEXT NOT NULL,          -- 수집 기준일 YYYY-MM-DD
+    eps_mean_est REAL,                   -- NTM EPS 평균 추정치 원본값
+    eps_chg_1w   REAL,                   -- 1주 전 대비 변화율 (%)
+    eps_chg_1m   REAL,                   -- 4주 전 대비 변화율 (%) ← 핵심
+    eps_chg_3m   REAL,                   -- 12주 전 대비 변화율 (%)
+    fetched_date TEXT NOT NULL,          -- 수집 기준일 YYYY-MM-DD (금요일)
     created_at   TEXT DEFAULT (datetime('now','localtime')),
-    PRIMARY KEY (ticker)
+    PRIMARY KEY (ticker, fetched_date)
 );
 
 -- 어닝 캘린더 (Finnhub earnings_calendar)
