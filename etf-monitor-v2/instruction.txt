@@ -1,0 +1,25 @@
+raw 파일 형식: etf_search_~.csv
+
+base_date = weekly update 하는 날짜. 주간으로 daily tracking. etf universe 주간 1회 업데이트. 
+run_date = etf_universe의 리밸런싱 일간 tracking/ 주식 현물, 선물, 옵션, 현금 모두 tracking
+
+~etf_{base_date}.csv = 최근 5일 평균 거래대금 10억원 이상 국내주식형 etf 스크리닝(유형: 일반, 레버리지, 인버스 1X, 인버스 2X)
+
+~run_{base_date}_{run_date}.csv = daily 구성종목. 구성종목 변화를 통해 리밸런싱 추적
+
+해당 raw 파일을 통해 확인할 수 있는 것
+
+1. weekly 일일 수익률(금~목). 단순 평균 수익률 & 시총 가중 수익률, 테마별/유형별 수익률(단순평균, 시총 가중)
+
+2. 일별 ETF Creation Unit(num_cu) = 상장 주식수/CU구성좌수. 설정/환매 동향. 1 cu당 가치*delta_num_cu를 통해 일간 총 자금 유입/유출 추적
+
+3. 일별 리밸런싱 현황: 주식 현물/선물, 옵션 주식수(계약수) 변화. 리밸런싱으로 인한 자금 유입/유출 추적
+
+4. 이번주 cu 증가에 따른 aum 증가 큰 폭으로 나타난 etf 목록(주간 합계/ 일간), 리밸런싱으로 인해 자금 유입/유출이 큰폭으로 나타난 주식 현물/선물 옵션 등 목록 추적(주간 합계/ 일간)
+
+5. 이번주 일별 리밸런싱된 etf 수, 대표 etf 목록
+
+6. etf universe 편입/편출 etf. etf universe AUM 현황 및 유입/유출(1cu당 aum * cu 증감). 편입/편출 event 영향 제거해서. 유형별로 분해(일반, 레버리지, 인버스 1X, 인버스 2X)
+
+투자전략 = 리밸런싱 수급 유입있었던 종목, 옵션만기일이었던 목요일 다음 영업일인 금요일 자금 유입 있었던 etf, 테마
+

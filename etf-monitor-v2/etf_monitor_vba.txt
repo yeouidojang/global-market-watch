@@ -1,0 +1,440 @@
+Option Explicit
+
+' #########################################################################
+' Proto_ETF_Run_Pipeline  (프로토타입 / 이중 루프)
+'
+'  루프문1: date!A15↓ → inSector!B6(base_date) → inSector 쿼리
+'           → 필터 → Screen(A14/B14) → Screen 쿼리 → etf → etf CSV
+'  루프문2: inSector!E4:I4(run_date, bd!A에 존재하는 것만)
+'           → run 배치 → run 쿼리 → run CSV
+'
+'  ※ 값붙여넣기 구간은 매번 초기화 후 기록(데이터 개수 변동 오염 방지).
+'  ※ '[가정]' 주석 = 스펙이 모호해 임의 결정한 부분. 테스트 후 조정.
+' #########################################################################
+
+' ===== 설정 상수 (환경에 맞게 조정) ======================================
+' 시트명
+Private Const SH_DATE      As String = "date"
+Private Const SH_INSECTOR  As String = "inSector"
+Private Const SH_SCREEN    As String = "Screen"
+Private Const SH_ETF       As String = "etf"
+Private Const SH_RUN       As String = "run"
+Private Const SH_BD        As String = "bd"
+
+' date 시트
+Private Const DATE_START_ROW As Long = 15
+Private Const DATE_COL       As Long = 1        ' A열
+
+' inSector
+Private Const INS_BASEDATE_CELL As String = "B6"
+Private Const INS_DATA_ROW      As Long = 14    ' 데이터 시작 행
+Private Const INS_READ_LASTCOL  As String = "Q" ' A14:Q 읽기 (17열)
+Private Const COL_CODE   As Long = 1    ' A
+Private Const COL_NAME   As Long = 2    ' B
+Private Const COL_G      As Long = 7    ' G: "주식" 또는 빈칸
+Private Const COL_H      As Long = 8    ' H: "국내"
+Private Const COL_K      As Long = 11   ' K: 일반/레버리지/인버스1X/인버스2X
+Private Const AVG_FIRST  As Long = 13   ' M
+Private Const AVG_LAST   As Long = 17   ' Q
+Private Const AVG_THRESH As Double = 1000#
+
+' inSector run_date 후보 (E4:I4) : 4행, 5~9열
+Private Const RUNDATE_ROW      As Long = 4
+Private Const RUNDATE_COL_FIRST As Long = 5     ' E
+Private Const RUNDATE_COL_LAST  As Long = 9     ' I
+
+' Screen
+Private Const SCR_UNIV_ROW   As Long = 14       ' 코드/종목명 붙여넣기 시작행 (A14,B14)
+Private Const SCR_COPY_ROW   As Long = 9        ' etf로 복사 시작행 (9행부터 끝까지)
+
+' etf
+Private Const ETF_PASTE_ROW  As Long = 1        ' Screen 9행↓ → etf 1행부터 붙여넣기
+Private Const ETF_RATIO_ROW  As Long = 6        ' AH~AL 계산 시작행
+Private Const ETF_PERIOD_ROW As Long = 2        ' 기간 헤더 행 (AB~AF 2행)
+Private Const NUM_FIRST As Long = 28  ' AB
+Private Const NUM_LAST  As Long = 32  ' AF
+Private Const NUM_DEN   As Long = 33  ' AG
+Private Const OUT_FIRST As Long = 34  ' AH
+Private Const OUT_LAST  As Long = 38  ' AL
+
+' run 배치
+Private Const RUN_B4       As String = "B4"
+Private Const RUN_ROW_CODE As Long = 8
+Private Const RUN_ROW_NAME As Long = 9
+Private Const RUN_ROW_HDR  As Long = 10
+Private Const RUN_COL_GAP  As Long = 5          ' A,F,K...
+' ========================================================================
+
+
+' =========================================================================
+' 메인 엔트리
+' =========================================================================
+Sub Proto_ETF_Run_Pipeline()
+
+    Dim wbThis As Workbook
+    Dim wsDate As Worksheet, wsIn As Worksheet, wsScr As Worksheet
+    Dim wsETF As Worksheet, wsRun As Worksheet, wsBD As Worksheet
+
+    Dim lastRow As Long, i As Long, c As Long
+    Dim baseDate As Variant, runDate As Variant
+    Dim baseName As String, savePath As String, fileName As String
+
+    Dim univ As Variant       ' etf_universe : (1..cnt, 1..2) 코드/종목명
+    Dim univCnt As Long
+
+    Set wbThis = ThisWorkbook
+
+    ' ── 필수 시트 확인 ────────────────────────────────────
+    If Not SheetExists(SH_DATE) Then MsgBox "'" & SH_DATE & "' 시트 없음", vbExclamation: Exit Sub
+    If Not SheetExists(SH_INSECTOR) Then MsgBox "'" & SH_INSECTOR & "' 시트 없음", vbExclamation: Exit Sub
+    If Not SheetExists(SH_SCREEN) Then MsgBox "'" & SH_SCREEN & "' 시트 없음", vbExclamation: Exit Sub
+    If Not SheetExists(SH_ETF) Then MsgBox "'" & SH_ETF & "' 시트 없음", vbExclamation: Exit Sub
+    If Not SheetExists(SH_RUN) Then MsgBox "'" & SH_RUN & "' 시트 없음", vbExclamation: Exit Sub
+    If Not SheetExists(SH_BD) Then MsgBox "'" & SH_BD & "' 시트 없음", vbExclamation: Exit Sub
+
+    Set wsDate = wbThis.Worksheets(SH_DATE)
+    Set wsIn = wbThis.Worksheets(SH_INSECTOR)
+    Set wsScr = wbThis.Worksheets(SH_SCREEN)
+    Set wsETF = wbThis.Worksheets(SH_ETF)
+    Set wsRun = wbThis.Worksheets(SH_RUN)
+    Set wsBD = wbThis.Worksheets(SH_BD)
+
+    ' ── 파일명/경로 ───────────────────────────────────────
+    baseName = wbThis.Name
+    If InStrRev(baseName, ".") > 0 Then baseName = Left(baseName, InStrRev(baseName, ".") - 1)
+    savePath = wbThis.Path
+    If savePath = "" Then MsgBox "파일을 먼저 저장 후 실행하세요.", vbExclamation: Exit Sub
+
+    ' ── date A15:끝 ───────────────────────────────────────
+    lastRow = wsDate.Cells(wsDate.Rows.Count, DATE_COL).End(xlUp).Row
+    If lastRow < DATE_START_ROW Then MsgBox "date A15↓ 데이터 없음", vbExclamation: Exit Sub
+
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+
+    ' ===== 루프문1 : base_date =============================================
+    For i = DATE_START_ROW To lastRow
+        baseDate = wsDate.Cells(i, DATE_COL).Value
+        If Len(CStr(baseDate)) = 0 Then GoTo NextBase
+
+        ' [1] inSector!B6 = 날짜 → base_date 로 확정
+        wsIn.Range(INS_BASEDATE_CELL).Value = baseDate
+        baseDate = wsIn.Range(INS_BASEDATE_CELL).Value      ' inSector!B6 값 = base_date
+
+        ' [2] inSector 하이퍼링크 실행
+        If Not FollowHyperlink(wsIn) Then GoTo NextBase
+        DoEvents
+
+        ' [3] 필터 → etf_universe, Screen A14/B14 세로 붙여넣기
+        If Not BuildUniverse(wsIn, wsScr, univ, univCnt) Then GoTo NextBase
+
+        ' [4] Screen 하이퍼링크 실행
+        If Not FollowHyperlink(wsScr) Then GoTo NextBase
+        DoEvents
+
+        ' [5] Screen 9행↓ → etf 붙여넣기 (초기화 후)
+        CopyScreenToETF wsScr, wsETF
+
+        ' [6] etf AH~AL = AB~AF / AG (6행↓), 헤더 num_cu + 기간
+        ComputeNumCU wsETF
+
+        ' [7] etf CSV 저장  (<파일명>_<시트명>_<base_date>.csv)
+        fileName = baseName & "_" & wsETF.Name & "_" & _
+                   SanitizeFileName(FormatKey(baseDate)) & ".csv"
+        ExportSheetAsCSV wsETF, savePath & Application.PathSeparator & fileName
+
+        ' ===== 루프문2 : run_date (E4:I4 중 bd!A 존재) =====================
+        For c = RUNDATE_COL_FIRST To RUNDATE_COL_LAST
+            If IsError(wsIn.Cells(RUNDATE_ROW, c).Value) Then GoTo NextRun   ' 오류셀 skip
+            runDate = wsIn.Cells(RUNDATE_ROW, c).Value
+            If Len(Trim$(CStr(runDate))) = 0 Then GoTo NextRun               ' 빈칸 skip
+            If Not ExistsInColumnByDate(wsBD, 1, runDate) Then GoTo NextRun  ' bd!A에 없으면 skip
+
+            ' [8] run 8행↓ 초기화 + run!B4 = run_date
+            ClearFromRow wsRun, RUN_ROW_CODE
+            wsRun.Range(RUN_B4).Value = runDate
+
+            ' [9] etf_universe → run 8/9행 5열간격 + 10행 헤더
+            PlaceRunUniverse wsRun, univ, univCnt
+
+            ' [10] run 하이퍼링크 실행 + CSV 저장
+            If FollowHyperlink(wsRun) Then
+                DoEvents
+                fileName = baseName & "_" & wsRun.Name & "_" & _
+                           SanitizeFileName(FormatKey(baseDate)) & "_" & _
+                           SanitizeFileName(FormatKey(runDate)) & ".csv"
+                ExportSheetAsCSV wsRun, savePath & Application.PathSeparator & fileName
+            End If
+NextRun:
+        Next c
+        ' ==================================================================
+
+NextBase:
+    Next i
+    ' =====================================================================
+
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    MsgBox "완료되었습니다. (프로토타입)", vbInformation
+
+End Sub
+
+
+' =========================================================================
+' [3] inSector 필터 → etf_universe 생성 + Screen A14/B14 세로 붙여넣기
+'     필터: (G="주식" or "") AND H="국내"
+'            AND K∈{일반,레버리지,인버스 1X,인버스 2X}
+'            AND avg(M:Q) >= 1000
+' =========================================================================
+Private Function BuildUniverse(wsIn As Worksheet, wsScr As Worksheet, _
+                               ByRef outUniv As Variant, ByRef outCnt As Long) As Boolean
+
+    Dim lastRowIn As Long
+    Dim arrIn As Variant
+    Dim u() As Variant
+    Dim cnt As Long, i As Long, cc As Long
+    Dim s As Double, n As Long, avgVal As Double
+    Dim kv As String
+
+    BuildUniverse = False
+    outCnt = 0
+
+    lastRowIn = wsIn.Cells(wsIn.Rows.Count, COL_CODE).End(xlUp).Row
+    If lastRowIn < INS_DATA_ROW Then
+        Debug.Print "[BuildUniverse] inSector 데이터 없음": Exit Function
+    End If
+    arrIn = wsIn.Range("A" & INS_DATA_ROW & ":" & INS_READ_LASTCOL & lastRowIn).Value
+
+    ReDim u(1 To UBound(arrIn, 1), 1 To 2)
+    cnt = 0
+    For i = 1 To UBound(arrIn, 1)
+        ' G="주식" 또는 빈칸
+        If (Trim$(CStr(arrIn(i, COL_G))) = "주식" Or Trim$(CStr(arrIn(i, COL_G))) = "") _
+           And Trim$(CStr(arrIn(i, COL_H))) = "국내" Then
+
+            kv = Trim$(CStr(arrIn(i, COL_K)))
+            If kv = "일반" Or kv = "레버리지" Or kv = "인버스 1X" Or kv = "인버스 2X" Then
+
+                ' M~Q 평균 (빈칸 제외 평균 = Excel AVERAGE 동작)
+                s = 0: n = 0
+                For cc = AVG_FIRST To AVG_LAST
+                    If IsNumeric(arrIn(i, cc)) Then s = s + CDbl(arrIn(i, cc)): n = n + 1
+                Next cc
+                If n > 0 Then
+                    avgVal = s / n
+                    If avgVal >= AVG_THRESH Then
+                        cnt = cnt + 1
+                        u(cnt, 1) = arrIn(i, COL_CODE)   ' A: 코드
+                        u(cnt, 2) = arrIn(i, COL_NAME)   ' B: 종목명
+                    End If
+                End If
+
+            End If
+        End If
+    Next i
+
+    If cnt = 0 Then
+        Debug.Print "[BuildUniverse] 조건 통과 종목 없음": Exit Function
+    End If
+
+    ' etf_universe 확정 (정확 크기 복사)
+    ReDim outUniv(1 To cnt, 1 To 2)
+    For i = 1 To cnt
+        outUniv(i, 1) = u(i, 1)
+        outUniv(i, 2) = u(i, 2)
+    Next i
+    outCnt = cnt
+
+    ' Screen A14/B14 세로 붙여넣기 (초기화 후)
+    wsScr.Range(wsScr.Cells(SCR_UNIV_ROW, 1), _
+                wsScr.Cells(wsScr.Rows.Count, 2)).ClearContents
+    wsScr.Cells(SCR_UNIV_ROW, 1).Resize(cnt, 2).Value = outUniv
+
+    BuildUniverse = True
+
+End Function
+
+
+' =========================================================================
+' [5] Screen 9행↓ 전체 → etf 6행부터 값 붙여넣기 (etf 붙여넣기 구간 초기화)
+' =========================================================================
+Private Sub CopyScreenToETF(wsScr As Worksheet, wsETF As Worksheet)
+
+    Dim sLastRow As Long, sLastCol As Long
+    Dim src As Variant
+
+    With wsScr.UsedRange
+        sLastRow = .Row + .Rows.Count - 1
+        sLastCol = .Column + .Columns.Count - 1
+    End With
+    If sLastRow < SCR_COPY_ROW Then Exit Sub          ' 복사할 데이터 없음
+
+    src = wsScr.Range(wsScr.Cells(SCR_COPY_ROW, 1), _
+                      wsScr.Cells(sLastRow, sLastCol)).Value
+
+    ' etf 붙여넣기 구간 초기화 (6행↓ 넓게)
+    ClearFromRow wsETF, ETF_PASTE_ROW
+
+    ' [가정] Screen 9행 → etf 6행에 정렬해 붙여넣기 (좌상단 A6)
+    wsETF.Cells(ETF_PASTE_ROW, 1).Resize( _
+        UBound(src, 1), UBound(src, 2)).Value = src
+
+End Sub
+
+
+' =========================================================================
+' [6] etf: AH~AL = AB~AF / AG (6행↓ 값), 헤더(기간행)에 num_cu+기간
+'     [가정] 헤더는 기간행(2행) AH2:AL2 에 "num_cu"+AB2..AF2 로 기록
+' =========================================================================
+Private Sub ComputeNumCU(wsETF As Worksheet)
+
+    Dim lastRow As Long, r As Long, k As Long
+    Dim denom As Variant, numer As Variant
+    Dim outArr() As Variant
+
+    ' 데이터 마지막 행 (AG열 기준, 없으면 A열)
+    lastRow = wsETF.Cells(wsETF.Rows.Count, NUM_DEN).End(xlUp).Row
+    If lastRow < ETF_RATIO_ROW Then
+        lastRow = wsETF.Cells(wsETF.Rows.Count, COL_CODE).End(xlUp).Row
+    End If
+    If lastRow < ETF_RATIO_ROW Then Exit Sub
+
+    ' 헤더: num_cu + 기간(AB~AF 2행)
+    For k = 0 To (NUM_LAST - NUM_FIRST)
+        wsETF.Cells(ETF_PERIOD_ROW, OUT_FIRST + k).Value = _
+            "num_cu_" & CStr(wsETF.Cells(ETF_PERIOD_ROW, NUM_FIRST + k).Value)
+    Next k
+
+    ' 값 계산 (6행↓)
+    ReDim outArr(1 To lastRow - ETF_RATIO_ROW + 1, 1 To (OUT_LAST - OUT_FIRST + 1))
+    For r = ETF_RATIO_ROW To lastRow
+        denom = wsETF.Cells(r, NUM_DEN).Value
+        For k = 0 To (NUM_LAST - NUM_FIRST)
+            numer = wsETF.Cells(r, NUM_FIRST + k).Value
+            If IsNumeric(numer) And IsNumeric(denom) Then
+                If CDbl(denom) <> 0 Then
+                    outArr(r - ETF_RATIO_ROW + 1, k + 1) = CDbl(numer) / CDbl(denom)
+                Else
+                    outArr(r - ETF_RATIO_ROW + 1, k + 1) = ""   ' 0 나눗셈 방지
+                End If
+            Else
+                outArr(r - ETF_RATIO_ROW + 1, k + 1) = ""
+            End If
+        Next k
+    Next r
+    wsETF.Cells(ETF_RATIO_ROW, OUT_FIRST).Resize( _
+        lastRow - ETF_RATIO_ROW + 1, OUT_LAST - OUT_FIRST + 1).Value = outArr
+
+End Sub
+
+
+' =========================================================================
+' [9] etf_universe → run 8/9행 5열간격 + 10행 헤더 반복
+' =========================================================================
+Private Sub PlaceRunUniverse(wsRun As Worksheet, ByVal univ As Variant, ByVal cnt As Long)
+    Dim i As Long, colIdx As Long
+    For i = 1 To cnt
+        colIdx = 1 + (i - 1) * RUN_COL_GAP          ' A,F,K...
+        wsRun.Cells(RUN_ROW_CODE, colIdx).Value = univ(i, 1)   ' 8행: 코드
+        wsRun.Cells(RUN_ROW_NAME, colIdx).Value = univ(i, 2)   ' 9행: 종목명
+        wsRun.Cells(RUN_ROW_HDR, colIdx + 0).Value = "코드"
+        wsRun.Cells(RUN_ROW_HDR, colIdx + 1).Value = "구성종목"
+        wsRun.Cells(RUN_ROW_HDR, colIdx + 2).Value = "주식수(계약수)"
+        wsRun.Cells(RUN_ROW_HDR, colIdx + 3).Value = "금액"
+        wsRun.Cells(RUN_ROW_HDR, colIdx + 4).Value = "금액기준 구성비중(%)"
+    Next i
+End Sub
+
+
+' =========================================================================
+' 보조 함수
+' =========================================================================
+
+' 지정 행부터 시트 끝까지 초기화(사용영역 폭 기준). 상단 행은 보존.
+Private Sub ClearFromRow(ws As Worksheet, ByVal startRow As Long)
+    Dim lastRow As Long, lastCol As Long
+    With ws.UsedRange
+        lastRow = .Row + .Rows.Count - 1
+        lastCol = .Column + .Columns.Count - 1
+    End With
+    If lastRow < startRow Then lastRow = startRow
+    If lastCol < 1 Then lastCol = 1
+    ws.Range(ws.Cells(startRow, 1), ws.Cells(lastRow, lastCol)).ClearContents
+End Sub
+
+' 시트 A1 하이퍼링크 실행
+Private Function FollowHyperlink(ws As Worksheet) As Boolean
+    FollowHyperlink = False
+    If ws.Cells(1, 1).Hyperlinks.Count > 0 Then
+        ws.Cells(1, 1).Hyperlinks(1).Follow
+        FollowHyperlink = True
+    Else
+        Debug.Print "[" & ws.Name & "] A1 하이퍼링크 없음"
+    End If
+End Function
+
+' 특정 열에 값 존재 여부 (날짜는 yyyymmdd 정규화 비교 → 타입 불일치 무시)
+Private Function ExistsInColumnByDate(ws As Worksheet, ByVal colIndex As Long, ByVal val As Variant) As Boolean
+    Dim lastRow As Long, r As Long
+    Dim arr As Variant
+    Dim key As String
+
+    ExistsInColumnByDate = False
+    If IsError(val) Then Exit Function
+    key = FormatKey(val)                         ' 후보값 → yyyymmdd(또는 문자열)
+
+    lastRow = ws.Cells(ws.Rows.Count, colIndex).End(xlUp).Row
+    If lastRow < 1 Then Exit Function
+    arr = ws.Range(ws.Cells(1, colIndex), ws.Cells(lastRow, colIndex)).Value
+
+    For r = 1 To UBound(arr, 1)
+        If Not IsError(arr(r, 1)) Then
+            If Len(Trim$(CStr(arr(r, 1)))) > 0 Then
+                If FormatKey(arr(r, 1)) = key Then   ' 양쪽 모두 정규화해 비교
+                    ExistsInColumnByDate = True
+                    Exit Function
+                End If
+            End If
+        End If
+    Next r
+End Function
+
+Private Function SheetExists(ByVal nm As String) As Boolean
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(nm)
+    On Error GoTo 0
+    SheetExists = Not ws Is Nothing
+End Function
+
+Private Sub ExportSheetAsCSV(ws As Worksheet, fullPath As String)
+    Dim wbTmp As Workbook
+    ws.Copy
+    Set wbTmp = ActiveWorkbook
+    Application.DisplayAlerts = False
+    On Error Resume Next
+    wbTmp.SaveAs fileName:=fullPath, FileFormat:=62      ' xlCSVUTF8
+    If Err.Number <> 0 Then
+        Err.Clear
+        wbTmp.SaveAs fileName:=fullPath, FileFormat:=xlCSV
+    End If
+    On Error GoTo 0
+    wbTmp.Close SaveChanges:=False
+    Application.DisplayAlerts = True
+End Sub
+
+Private Function FormatKey(v As Variant) As String
+    If IsDate(v) Then
+        FormatKey = Format(v, "yyyymmdd")
+    Else
+        FormatKey = CStr(v)
+    End If
+End Function
+
+Private Function SanitizeFileName(s As String) As String
+    Dim ch As Variant
+    For Each ch In Array("\", "/", ":", "*", "?", """", "<", ">", "|")
+        s = Replace(s, ch, "_")
+    Next ch
+    SanitizeFileName = Trim(s)
+End Function
