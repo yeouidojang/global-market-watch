@@ -574,7 +574,229 @@ def collect_macro(target_date: str, cfg: dict, db: DBManager) -> int:
                 "volume":   row.get("volume"),
             })
 
-    return db.upsert_market_daily(records)
+    n = db.upsert_market_daily(records)
+
+    # 매크로 지표 이력 부족 시 자동 backfill (250거래일)
+    try:
+        _backfill_macro_if_needed(cfg, db, target_date)
+    except Exception as _bfe:
+        print(f"  [macro backfill ERROR] {_bfe}")
+
+    return n
+
+
+def _backfill_macro_if_needed(cfg: dict, db: DBManager, target_date: str,
+                               min_records: int = 22, backfill_days: int = 250):
+    """
+    매크로 지표 DB 히스토리 부족 시 최근 backfill_days 거래일 데이터 자동 수집.
+    최근 60일 내 min_records 이상 데이터가 있으면 스킵.
+    """
+    # 지표 이름/소스 매핑 수집
+    lseg_items: dict = {}   # {name: {ric, category}}
+    yf_items:   dict = {}   # {name: {ticker, category}}
+    bok_items:  list = []   # BoK ECOS 금리
+    krx_items:  list = []   # KRX VKOSPI 등
+
+    cat_map = {"fx": "fx", "rates": "rate", "commodities": "commodity"}
+    for cat, db_cat in cat_map.items():
+        for item in cfg.get(cat, []):
+            src = item.get("source", "lseg")
+            if src == "lseg":
+                lseg_items[item["name"]] = {"ric": item["ric"], "category": db_cat}
+            elif src == "yfinance":
+                yf_items[item["name"]] = {"ticker": item["ticker"], "category": db_cat}
+            elif src == "bok":
+                bok_items.append(item)
+    for item in cfg.get("volatility", []):
+        src = item.get("source", "lseg")
+        if src == "yfinance":
+            yf_items[item["name"]] = {"ticker": item["ticker"], "category": "volatility"}
+        elif src == "krx":
+            krx_items.append(item)
+
+    all_names = (list(lseg_items.keys()) + list(yf_items.keys())
+                 + [i["name"] for i in bok_items] + [i["name"] for i in krx_items])
+    if not all_names:
+        return
+
+    # DB 레코드 수 확인 (최근 60일)
+    check_start = (pd.Timestamp(target_date) - pd.Timedelta(days=60)).strftime("%Y-%m-%d")
+    placeholders = ",".join("?" * len(all_names))
+    conn = db._connect()
+    rows = conn.execute(
+        f"SELECT name, COUNT(*) AS cnt FROM market_daily "
+        f"WHERE name IN ({placeholders}) AND date BETWEEN ? AND ? GROUP BY name",
+        all_names + [check_start, target_date],
+    ).fetchall()
+    conn.close()
+
+    counts = {r[0]: r[1] for r in rows}
+    need_lseg = {n: v for n, v in lseg_items.items() if counts.get(n, 0) < min_records}
+    need_yf   = {n: v for n, v in yf_items.items()   if counts.get(n, 0) < min_records}
+    need_bok  = [i for i in bok_items  if counts.get(i["name"], 0) < min_records]
+    need_krx  = [i for i in krx_items  if counts.get(i["name"], 0) < min_records]
+
+    if not need_lseg and not need_yf and not need_bok and not need_krx:
+        return
+
+    print(f"  [macro backfill] LSEG {len(need_lseg)}개 / yfinance {len(need_yf)}개 "
+          f"/ BoK {len(need_bok)}개 / KRX {len(need_krx)}개 "
+          f"이력 부족 → 최근 {backfill_days}거래일 backfill 시작")
+
+    # 히스토리 기간: backfill_days 거래일 ≈ backfill_days×1.5 캘린더일
+    hist_start = (pd.Timestamp(target_date) - pd.Timedelta(days=int(backfill_days * 1.5))
+                  ).strftime("%Y-%m-%d")
+    bf_records: list[dict] = []
+
+    # LSEG backfill (30일 단위 분할 — 대용량 응답 오류 방지)
+    if need_lseg:
+        rics = [v["ric"] for v in need_lseg.values()]
+        name_map = {v["ric"]: {"name": n, "category": v["category"]}
+                    for n, v in need_lseg.items()}
+
+        def _fetch_one_ric(ric, chunk_start, chunk_end):
+            """단일 RIC get_history → list[record dict] 반환."""
+            meta = name_map.get(ric, {})
+            try:
+                df_h = ld.get_history(
+                    universe=[ric],
+                    fields=["YLDTOMAT", "TRDPRC_1", "OPEN_PRC", "HIGH_1", "LOW_1", "ACVOL_UNS", "BID"],
+                    start=chunk_start,
+                    end=chunk_end,
+                )
+            except Exception as e:
+                print(f"  [macro backfill LSEG {ric} {chunk_start}~{chunk_end} ERROR] {e}")
+                return []
+            if df_h is None or df_h.empty:
+                return []
+            # 단일 RIC → 단순 컬럼 인덱스
+            sub = df_h.dropna(how="all")
+            out = []
+            for dt_idx, row in sub.iterrows():
+                close = _coalesce(row, "YLDTOMAT", "TRDPRC_1", "BID")
+                if close is None:
+                    continue
+                out.append({
+                    "date": str(dt_idx)[:10], "session": "macro",
+                    "category": meta.get("category", "fx"),
+                    "name":   meta.get("name", ric),
+                    "close":  close,
+                    "open":   _coalesce(row, "OPEN_PRC"),
+                    "high":   _coalesce(row, "HIGH_1"),
+                    "low":    _coalesce(row, "LOW_1"),
+                    "volume": _coalesce(row, "ACVOL_UNS"),
+                })
+            return out
+
+        # RIC별 × 30일 청크로 순차 요청 (SDK가 다중 RIC 동시 요청 시 IndexError 발생)
+        total_chunks = 0
+        for ric in rics:
+            chunk_end_ts = pd.Timestamp(target_date)
+            limit_start_ts = pd.Timestamp(hist_start)
+            while chunk_end_ts > limit_start_ts:
+                chunk_start_ts = max(chunk_end_ts - pd.Timedelta(days=30), limit_start_ts)
+                recs = _fetch_one_ric(
+                    ric,
+                    chunk_start_ts.strftime("%Y-%m-%d"),
+                    chunk_end_ts.strftime("%Y-%m-%d"),
+                )
+                bf_records.extend(recs)
+                total_chunks += 1
+                chunk_end_ts = chunk_start_ts - pd.Timedelta(days=1)
+        if total_chunks:
+            print(f"  [macro backfill LSEG] {len(rics)}개 RIC × {total_chunks//max(len(rics),1)}청크 처리 완료")
+
+    # yfinance backfill
+    if need_yf:
+        tickers = [v["ticker"] for v in need_yf.values()]
+        name_map_yf = {v["ticker"]: {"name": n, "category": v["category"]}
+                       for n, v in need_yf.items()}
+        try:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                raw = yf.download(tickers, start=hist_start, end=target_date,
+                                  progress=False, auto_adjust=True, group_by="ticker")
+            if raw is not None and not raw.empty:
+                single = len(tickers) == 1
+                for ticker in tickers:
+                    meta = name_map_yf.get(ticker, {})
+                    try:
+                        df_t = raw if single else raw[ticker]
+                        df_t = df_t.dropna(how="all")
+                        for dt_idx, row in df_t.iterrows():
+                            close_v = row.get("Close")
+                            if pd.isna(close_v):
+                                continue
+                            bf_records.append({
+                                "date": str(dt_idx.date()) if hasattr(dt_idx, "date") else str(dt_idx)[:10],
+                                "session": "macro",
+                                "category": meta.get("category", "volatility"),
+                                "name":   meta.get("name", ticker),
+                                "close":  float(close_v),
+                                "open":   float(row["Open"])   if pd.notna(row.get("Open"))   else None,
+                                "high":   float(row["High"])   if pd.notna(row.get("High"))   else None,
+                                "low":    float(row["Low"])    if pd.notna(row.get("Low"))    else None,
+                                "volume": float(row["Volume"]) if pd.notna(row.get("Volume")) else None,
+                            })
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"  [macro backfill yfinance ERROR] {e}")
+
+    # BoK 백필 (한국 금리 — start~end 범위 직접 요청)
+    if need_bok:
+        bok_start = (pd.Timestamp(target_date) - pd.Timedelta(days=int(backfill_days * 1.5))
+                     ).strftime("%Y-%m-%d")
+        bok_end   = target_date
+        start_s   = bok_start.replace("-", "")
+        end_s     = bok_end.replace("-", "")
+        for item in need_bok:
+            try:
+                import requests as _req
+                url = (f"{BOK_BASE_URL}/{BOK_API_KEY}/json/kr/1/500/"
+                       f"{item['stat_code']}/D/{start_s}/{end_s}/{item['item_code']}")
+                resp = _req.get(url, timeout=15, verify=False)
+                resp.raise_for_status()
+                rows_bok = resp.json().get("StatisticSearch", {}).get("row", [])
+                for r in rows_bok:
+                    raw = r.get("DATA_VALUE", "")
+                    if not raw or not raw.strip():
+                        continue
+                    t = r["TIME"]
+                    dt = f"{t[:4]}-{t[4:6]}-{t[6:8]}"
+                    bf_records.append({
+                        "date": dt, "session": "macro", "category": "rate",
+                        "name": item["name"], "close": float(raw),
+                        "open": None, "high": None, "low": None, "volume": None,
+                    })
+            except Exception as e:
+                print(f"  [macro backfill BoK {item['name']} ERROR] {e}")
+
+    # KRX 백필 (VKOSPI 등 — lookback_days로 긴 기간 조회)
+    if need_krx:
+        krx_lookback = int(backfill_days * 1.5)
+        for item in need_krx:
+            if item.get("kind") == "vkospi":
+                try:
+                    recs = fetch_krx_vkospi(target_date, lookback_days=krx_lookback)
+                    for r in recs:
+                        if r.get("close") is None:
+                            continue
+                        bf_records.append({
+                            "date": r["date"], "session": "macro", "category": "volatility",
+                            "name": item["name"], "close": r["close"],
+                            "open": r.get("open"), "high": r.get("high"),
+                            "low": r.get("low"), "volume": None,
+                        })
+                except Exception as e:
+                    print(f"  [macro backfill KRX {item['name']} ERROR] {e}")
+
+    if bf_records:
+        n = db.upsert_market_daily(bf_records)
+        print(f"  [macro backfill] 완료: {n}건 저장 "
+              f"(LSEG {len(need_lseg)}개 + yf {len(need_yf)}개 "
+              f"+ BoK {len(need_bok)}개 + KRX {len(need_krx)}개 지표, {backfill_days}거래일)")
 
 
 # ------------------------------------------------------------------ #

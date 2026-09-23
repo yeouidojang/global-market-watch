@@ -7,6 +7,7 @@ KOSPI+KOSDAQ 주요 종목 및 특징주 수집 (pykrx)
 
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -15,6 +16,8 @@ load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
 import pandas as pd
+
+KST = timezone(timedelta(hours=9))
 
 from exe.collect_macro import _get_krx_session, _KRX_UA
 
@@ -438,7 +441,7 @@ def fetch_top_stocks(
 
         prev_close_map: dict[str, float] = {}
         prev_close_map_1m: dict[str, float] = {}
-        prev_trade_map:  dict[str, float]       = {}   # 전일 거래대금 (tv_chg% 계산용)
+        tv_history_map:  dict[str, list[float]] = {}   # 5거래일 거래대금 히스토리 (tv_chg용)
         vol_history_map: dict[str, list[float]] = {}   # 5거래일 거래량 히스토리 (surge_ratio용)
         try:
             prev_close_map    = _fetch_prev_close((7, 8, 9, 10))
@@ -476,8 +479,8 @@ def fetch_top_stocks(
                 _has_data = False
                 for _rec in _day_rows:
                     _tk = _rec["ticker"]
-                    if _rec["tv"] and _rec["tv"] > 0 and _tk not in prev_trade_map:
-                        prev_trade_map[_tk] = _rec["tv"]
+                    if _rec["tv"] and _rec["tv"] > 0:
+                        tv_history_map.setdefault(_tk, []).append(_rec["tv"])
                     if _rec["vol"] and _rec["vol"] > 0:
                         vol_history_map.setdefault(_tk, []).append(_rec["vol"])
                         _has_data = True
@@ -485,6 +488,11 @@ def fetch_top_stocks(
                     _days_collected += 1
         except Exception:
             pass
+        # 5D 평균 거래대금 맵 (최대 5일치 평균)
+        avg_tv_5d_map: dict[str, float] = {
+            tk: sum(tvs[:5]) / min(len(tvs), 5)
+            for tk, tvs in tv_history_map.items() if tvs
+        }
 
         # ── 2. 투자자별 순매수 (외국인·기관, 전 종목) ────────────────
         inv_map = {}      # 전체: {ticker: {"foreign_net": int, "inst_net": int}}
@@ -608,7 +616,7 @@ def fetch_top_stocks(
             for _, r in major_df.iterrows():
                 _pc    = prev_close_map.get(str(r["ticker"]))
                 _pc1m  = prev_close_map_1m.get(str(r["ticker"]))
-                _ptv   = prev_trade_map.get(str(r["ticker"]))
+                _ptv   = avg_tv_5d_map.get(str(r["ticker"]))
                 _r1w   = round((int(r["close"]) - _pc)   / _pc   * 100, 2) if _pc   and _pc   > 0 else None
                 _r1m   = round((int(r["close"]) - _pc1m) / _pc1m * 100, 2) if _pc1m and _pc1m > 0 else None
                 _tv    = int(r["trade_val"])
@@ -655,7 +663,7 @@ def fetch_top_stocks(
                 elif it is not None and it < 0: signals.append("기관매도")
                 _pc   = prev_close_map.get(str(r["ticker"]))
                 _pc1m = prev_close_map_1m.get(str(r["ticker"]))
-                _ptv  = prev_trade_map.get(str(r["ticker"]))
+                _ptv  = avg_tv_5d_map.get(str(r["ticker"]))
                 _r1w  = round((int(r["close"]) - _pc)   / _pc   * 100, 2) if _pc   and _pc   > 0 else None
                 _r1m  = round((int(r["close"]) - _pc1m) / _pc1m * 100, 2) if _pc1m and _pc1m > 0 else None
                 _tv   = int(r["trade_val"])
@@ -888,11 +896,13 @@ def _fetch_asia_market(chain: str, target_date: str,
     ret_1m_map: dict[str, float] = {}
     tv_chg_map: dict[str, float] = {}
     # 날짜 불일치 보정용 맵 (hist가 target_date 미포함 시 meta_close 기준 재계산)
-    _hist_last_date:  dict[str, str]   = {}
-    _hist_last_close: dict[str, float] = {}  # hist[-1] close (= 어제)
-    _hist_1w_ref:     dict[str, float] = {}  # hist[-5] close (hist 미포함 시 오늘 기준 1W)
-    _hist_1m_ref:     dict[str, float] = {}  # hist[0] close (1M 기준)
-    _hist_last_tv:    dict[str, float] = {}  # hist[-1] trade_val (= 어제 거래대금)
+    _hist_last_date:      dict[str, str]   = {}
+    _hist_last_close:     dict[str, float] = {}  # hist[-1] close
+    _hist_2nd_last_close: dict[str, float] = {}  # hist[-2] close (stale 보정용)
+    _hist_1w_ref:         dict[str, float] = {}  # hist[-5] close (1W 기준)
+    _hist_1m_ref:         dict[str, float] = {}  # hist[0]  close (1M 기준)
+    _hist_last_tv:        dict[str, float] = {}  # hist[-1] trade_val (보정 단계 meta TV 계산용)
+    _hist_5d_avg_tv:      dict[str, float] = {}  # 이전 5D 평균 거래대금
     md_records: list[dict] = []
     if hist is not None and not hist.empty:
         hist.columns = [str(c).strip() for c in hist.columns]
@@ -939,6 +949,8 @@ def _fetch_asia_market(chain: str, target_date: str,
             # 날짜 불일치 보정을 위한 기준값 저장
             _hist_last_date[str(t)]  = str(g["date"].iloc[-1])[:10]
             _hist_last_close[str(t)] = float(g["close"].iloc[-1])
+            if n >= 2:
+                _hist_2nd_last_close[str(t)] = float(g["close"].iloc[-2])
             if n >= 1:
                 _hist_1m_ref[str(t)] = float(g["close"].iloc[0])
             if n >= 5:
@@ -958,15 +970,26 @@ def _fetch_asia_market(chain: str, target_date: str,
                 first_close = float(g["close"].iloc[0])
                 if first_close > 0:
                     ret_1m_map[str(t)] = round((cur_close - first_close) / first_close * 100, 2)
-                # 거래대금 전일대비 Chg%
+                # 거래대금 이전5D 평균 대비 Chg%
                 if "volume" in g.columns:
-                    _today_vol = g["volume"].fillna(0).iloc[-1]
-                    _prev_vol  = g["volume"].fillna(0).iloc[-2]
-                    _today_tv  = cur_close  * float(_today_vol)
-                    _prev_tv   = prev_close * float(_prev_vol)
-                    _hist_last_tv[str(t)] = _today_tv  # 어제 거래대금 (hist 미포함 시 사용)
-                    if _prev_tv > 0:
-                        tv_chg_map[str(t)] = round((_today_tv - _prev_tv) / _prev_tv * 100, 2)
+                    _vols = g["volume"].fillna(0)
+                    _closes = g["close"]
+                    _today_vol = float(_vols.iloc[-1])
+                    _today_tv  = cur_close * _today_vol
+                    _hist_last_tv[str(t)] = _today_tv  # 보정 단계에서 meta TV 대체 전 기준값
+                    # hist[-1]이 오늘이면 이전5D = hist[-6:-1], 어제면 hist[-5:]
+                    _last_dt_tv = _hist_last_date.get(str(t), "")
+                    if _last_dt_tv >= target_date:
+                        _prev_slice = slice(-6, -1)
+                    else:
+                        _prev_slice = slice(-5, None)
+                    _tvs_prev = [float(_closes.iloc[i]) * float(_vols.iloc[i])
+                                 for i in range(len(_closes))[_prev_slice]
+                                 if float(_vols.iloc[i]) > 0]
+                    _avg_5d = float(sum(_tvs_prev) / len(_tvs_prev)) if _tvs_prev else 0
+                    _hist_5d_avg_tv[str(t)] = _avg_5d
+                    if _avg_5d > 0:
+                        tv_chg_map[str(t)] = round((_today_tv - _avg_5d) / _avg_5d * 100, 2)
             vols = g["volume"].dropna()
             if len(vols) >= 4:
                 today_vol = float(vols.iloc[-1])
@@ -981,7 +1004,21 @@ def _fetch_asia_market(chain: str, target_date: str,
         _corrected = 0
         for _t, _last_dt in _hist_last_date.items():
             if _last_dt >= target_date:
-                continue  # hist에 오늘 데이터 포함 → 이미 정확
+                # hist가 오늘 날짜를 포함: hist[-1] == hist[-2]이면 LSEG stale 데이터
+                # (종가 미확정 상태로 오늘 행을 추가한 경우) → meta_close로 1D만 보정
+                _h1 = _hist_last_close.get(_t, 0)
+                _h2 = _hist_2nd_last_close.get(_t, 0)
+                if _h1 > 0 and _h2 > 0 and abs(_h1 - _h2) / _h2 < 0.0001:
+                    # stale: hist[-1] ≈ hist[-2] → meta_close vs hist[-2]로 1D 계산
+                    if _t in _meta_idx.index:
+                        _mr2 = _meta_idx.loc[_t]
+                        if isinstance(_mr2, pd.DataFrame):
+                            _mr2 = _mr2.iloc[0]
+                        _mc2 = _mr2.get("close") if isinstance(_mr2, pd.Series) else None
+                        if _mc2 is not None and not pd.isna(_mc2) and float(_mc2) > 0 and _h2 > 0:
+                            chg_map[_t] = round((float(_mc2) - _h2) / _h2 * 100, 2)
+                            _corrected += 1
+                continue  # 1W/1M는 hist 계산값 유지
             if _t not in _meta_idx.index:
                 continue
             _mrow = _meta_idx.loc[_t]
@@ -1000,13 +1037,13 @@ def _fetch_asia_market(chain: str, target_date: str,
             _c1m = _hist_1m_ref.get(_t)
             if _c1m and _c1m > 0:
                 ret_1m_map[_t] = round((_meta_cl - _c1m) / _c1m * 100, 2)
-            # tv_chg: 오늘 거래대금 = meta_close × meta_volume vs 어제 거래대금
+            # tv_chg: 오늘 거래대금 = meta_close × meta_volume vs 이전 5D 평균 거래대금
             _meta_vol = _mrow.get("volume") if isinstance(_mrow, pd.Series) else None
             if _meta_vol is not None and pd.notna(_meta_vol) and float(_meta_vol) > 0:
                 _today_tv = _meta_cl * float(_meta_vol)
-                _prev_tv  = _hist_last_tv.get(_t, 0)
-                if _prev_tv > 0:
-                    tv_chg_map[_t] = round((_today_tv - _prev_tv) / _prev_tv * 100, 2)
+                _avg_5d   = _hist_5d_avg_tv.get(_t, 0)
+                if _avg_5d > 0:
+                    tv_chg_map[_t] = round((_today_tv - _avg_5d) / _avg_5d * 100, 2)
             _corrected += 1
         if _corrected:
             print(f"    [{market_key} date-fix] {_corrected}개 종목 chg/1W/1M meta_close 기준 재계산 (hist={_last_dt} < {target_date})")
@@ -1234,10 +1271,9 @@ def fetch_europe_stocks(target_date: str) -> dict:
     hist_start = (pd.Timestamp(target_date) - pd.Timedelta(days=32)).strftime("%Y-%m-%d")  # 32일 = 약 22거래일 (1M)
 
     def _lseg_batch(rics: list[str]) -> dict[str, dict]:
-        """LSEG RIC 리스트 → {ric: {close, chg_pct, volume}}.
+        """LSEG RIC 리스트 → {ric: {close, chg_pct, volume, ret_1w, ret_1m}}.
 
-        단일 날짜 쿼리는 휴장일·지연 데이터 시 0건 반환 위험이 있으므로
-        hist_start ~ today_end 범위로 조회 후 최신 행을 취한다.
+        hist_start ~ today_end 범위 이력을 조회해 최신 행 기준 1D/1W/1M 수익률을 인메모리 계산.
         """
         if not rics:
             return {}
@@ -1260,28 +1296,43 @@ def fetch_europe_stocks(target_date: str) -> dict:
         if df is None or df.empty:
             return {}
 
+        def _row_to_entry(hist_df: pd.DataFrame) -> dict:
+            hist_df = hist_df.dropna(subset=["TRDPRC_1"])
+            if hist_df.empty:
+                return {}
+            r = hist_df.iloc[-1]
+            close = r.get("TRDPRC_1")
+            entry = {
+                "close":   close,
+                "chg_pct": r.get("PCTCHNG"),
+                "volume":  r.get("ACVOL_UNS"),
+                "ret_1w":  None,
+                "ret_1m":  None,
+            }
+            if close is not None and pd.notna(close) and float(close) > 0:
+                c = float(close)
+                if len(hist_df) >= 6:
+                    p1w = hist_df["TRDPRC_1"].iloc[-6]
+                    if pd.notna(p1w) and float(p1w) > 0:
+                        entry["ret_1w"] = round((c - float(p1w)) / float(p1w) * 100, 2)
+                if len(hist_df) >= 22:
+                    p1m = hist_df["TRDPRC_1"].iloc[-22]
+                    if pd.notna(p1m) and float(p1m) > 0:
+                        entry["ret_1m"] = round((c - float(p1m)) / float(p1m) * 100, 2)
+            return entry
+
         result = {}
         if isinstance(df.columns, pd.MultiIndex):
             for ric in rics:
                 try:
-                    row = df.xs(ric, axis=1, level=0)
-                    if not row.empty:
-                        r = row.iloc[-1]
-                        result[ric] = {
-                            "close":   r.get("TRDPRC_1"),
-                            "chg_pct": r.get("PCTCHNG"),
-                            "volume":  r.get("ACVOL_UNS"),
-                        }
+                    sub = df.xs(ric, axis=1, level=0)
+                    if not sub.empty:
+                        result[ric] = _row_to_entry(sub)
                 except KeyError:
                     pass
         else:
             if rics and not df.empty:
-                r = df.iloc[-1]
-                result[rics[0]] = {
-                    "close":   r.get("TRDPRC_1"),
-                    "chg_pct": r.get("PCTCHNG"),
-                    "volume":  r.get("ACVOL_UNS"),
-                }
+                result[rics[0]] = _row_to_entry(df)
         return result
 
     # ── 1. STOXX600 섹터 지수 (LSEG, 변경 없음) ─────────────────────
@@ -1302,7 +1353,37 @@ def fetch_europe_stocks(target_date: str) -> dict:
             "name":    meta_name,
             "close":   round(float(close_v), 2),
             "chg_pct": round(float(chg_v), 2) if (chg_v is not None and not pd.isna(chg_v)) else None,
+            "ret_1w":  v.get("ret_1w"),   # _lseg_batch에서 인메모리 계산
+            "ret_1m":  v.get("ret_1m"),
         })
+
+    # STOXX600 섹터 1D/1W/1M: LSEG 인메모리 계산이 없는 경우 DB 역사 데이터로 보완
+    try:
+        from db.db_manager import DBManager as _DBMEU
+        _econn = _DBMEU()._connect()
+        for s in sectors:
+            rows = _econn.execute(
+                "SELECT close FROM market_daily WHERE session='europe' AND category='sector' "
+                "AND name=? AND date < ? AND close IS NOT NULL ORDER BY date DESC LIMIT 22",
+                (s["ric"], target_date)
+            ).fetchall()
+            cur = s["close"]
+            if rows and s["chg_pct"] is None:
+                p1d = rows[0]["close"]
+                if p1d and p1d > 0:
+                    s["chg_pct"] = round((cur - p1d) / p1d * 100, 2)
+            if s["ret_1w"] is None and len(rows) >= 5:
+                p1w = rows[4]["close"]
+                if p1w and p1w > 0:
+                    s["ret_1w"] = round((cur - p1w) / p1w * 100, 2)
+            if s["ret_1m"] is None and len(rows) >= 21:
+                p1m = rows[20]["close"]
+                if p1m and p1m > 0:
+                    s["ret_1m"] = round((cur - p1m) / p1m * 100, 2)
+        _econn.close()
+    except Exception as _eu_hist_e:
+        print(f"    [europe sector 1W/1M DB] {_eu_hist_e}")
+
     sectors.sort(key=lambda x: (x["chg_pct"] or 0), reverse=True)
 
     # ── 2. DAX40·FTSE30·CAC40 구성종목 (yfinance) ───────────────────
@@ -1338,6 +1419,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
 
         # 거래대금 (현지통화 millions) + surge_ratio (오늘 / 과거 5일 평균)
         trade_val_local_m = None
+        avg_trade_val_lm  = None
         surge_ratio = None
         if vol and vol > 0:
             trade_val_local_m = (close * vol) / 1e6
@@ -1346,6 +1428,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
                 avg = float(hist_dvol.tail(5).mean())
                 if avg > 0:
                     surge_ratio = round(close * vol / avg, 2)
+                    avg_trade_val_lm = round(avg / 1e6, 2)
 
         c_1w  = float(df["Close"].iloc[-6]) if len(df) >= 6 else None
         c_1m  = float(df["Close"].iloc[0])  if len(df) >= 2 else None
@@ -1360,15 +1443,17 @@ def fetch_europe_stocks(target_date: str) -> dict:
             "ret_1w":       ret_1w,
             "ret_1m":       ret_1m,
             "volume":       int(vol) if vol else None,
-            "trade_val_lm": round(trade_val_local_m, 2) if trade_val_local_m else None,
-            "surge_ratio":  surge_ratio,
+            "trade_val_lm":     round(trade_val_local_m, 2) if trade_val_local_m else None,
+            "avg_trade_val_lm": avg_trade_val_lm,
+            "surge_ratio":      surge_ratio,
         }
 
-    # ── 시총 조회 (LSEG TR.CompanyMarketCap, batch=25 + retry×3 + yfinance fallback) ──
+    # ── 시총 + LSEG 거래량 조회 (TR.CompanyMarketCap + TR.Volume + TR.PriceClose, batch=25 + retry×3 + yfinance fallback) ──
     import time as _time
     import yfinance as _yf
 
     mktcap_b_map: dict[str, float] = {}
+    lseg_vol_map: dict[str, tuple] = {}   # tk → (volume, close) — yfinance 거래량 누락 보정용
     mktcap_failed: list[str] = []
 
     if stats:
@@ -1379,13 +1464,23 @@ def fetch_europe_stocks(target_date: str) -> dict:
             _success = False
             for _attempt in range(4):
                 try:
-                    mc_part = ld.get_data(universe=_batch, fields=["TR.CompanyMarketCap"])
+                    mc_part = ld.get_data(universe=_batch, fields=[
+                        "TR.CompanyMarketCap", "TR.Volume", "TR.PriceClose"
+                    ])
                     if mc_part is not None and not mc_part.empty:
                         for _, row in mc_part.iterrows():
                             tk = str(row.get("Instrument", "")).strip()
                             cap = row.get("Company Market Cap")
                             if tk and pd.notna(cap):
-                                mktcap_b_map[tk] = round(float(cap) / 1e9, 2)
+                                _mb = round(float(cap) / 1e9, 2)
+                                if _mb <= 15000:
+                                    mktcap_b_map[tk] = _mb
+                            # LSEG 거래량/종가: yfinance 누락 보정용
+                            vol_l  = row.get("Volume")
+                            cl_l   = row.get("Price Close")
+                            if (tk and pd.notna(vol_l) and pd.notna(cl_l)
+                                    and float(vol_l) > 0 and float(cl_l) > 0):
+                                lseg_vol_map[tk] = (float(vol_l), float(cl_l))
                     _success = True
                     break
                 except Exception as _be:
@@ -1401,7 +1496,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
             for tk in mktcap_failed:
                 try:
                     fi = _yf.Ticker(tk).fast_info
-                    mc = fi.get("market_cap") if hasattr(fi, "get") else getattr(fi, "market_cap", None)
+                    mc = getattr(fi, "market_cap", None)  # fi.get()은 항상 None 반환하는 버그
                     if mc:
                         mktcap_b_map[tk] = round(float(mc) / 1e9, 2)
                 except Exception as _ye:
@@ -1410,6 +1505,13 @@ def fetch_europe_stocks(target_date: str) -> dict:
 
     for tk, s in stats.items():
         s["mktcap_b"] = mktcap_b_map.get(tk)
+        # yfinance 거래량 0/None → LSEG 거래량으로 보정
+        if (not s.get("trade_val_lm")) and tk in lseg_vol_map:
+            _lv, _lc = lseg_vol_map[tk]
+            s["trade_val_lm"]     = round((_lc * _lv) / 1e6, 2)
+            s["avg_trade_val_lm"] = None   # 평균 대비 불가
+            s["surge_ratio"]      = None
+            print(f"      [eu vol fallback] {tk}: LSEG vol={_lv:.0f} → trade_val {s['trade_val_lm']:.1f}M")
 
     # 시장 폭 계산
     if stats:
@@ -1436,14 +1538,24 @@ def fetch_europe_stocks(target_date: str) -> dict:
         for t, s in sorted(stats.items(), key=lambda x: abs(x[1]["chg_pct"]), reverse=True)[:15]
     ]
 
+    def _eu_entry(t, s, signal):
+        dv_b    = (s.get("trade_val_lm") / 1000)     if s.get("trade_val_lm")     else None
+        avg_b   = (s.get("avg_trade_val_lm") / 1000) if s.get("avg_trade_val_lm") else None
+        sr      = s.get("surge_ratio")
+        tv_chg  = round((sr - 1) * 100, 1) if sr else None
+        return {
+            "ticker": t, "name": s["name"], "index": s["index"], "ccy": s["ccy"],
+            "close": s["close"], "chg_pct": s["chg_pct"],
+            "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
+            "mktcap_b": s.get("mktcap_b"),
+            "dollar_vol_b": dv_b, "avg_dvol_b": avg_b,
+            "tv_chg_pct": tv_chg, "surge_ratio": sr,
+            "signal": signal,
+        }
+
     # 시총 상위 10
     mktcap_top = [
-        {"ticker": t, "name": s["name"], "index": s["index"], "ccy": s["ccy"],
-         "close": s["close"], "chg_pct": s["chg_pct"], "ret_1w": s.get("ret_1w"),
-         "ret_1m": s.get("ret_1m"),
-         "mktcap_b": s.get("mktcap_b"),
-         "dollar_vol_b": (s.get("trade_val_lm") / 1000) if s.get("trade_val_lm") else None,
-         "signal": "시총상위"}
+        _eu_entry(t, s, "시총상위")
         for t, s in sorted(
             ((k, v) for k, v in stats.items() if v.get("mktcap_b") is not None),
             key=lambda x: x[1]["mktcap_b"], reverse=True
@@ -1452,39 +1564,29 @@ def fetch_europe_stocks(target_date: str) -> dict:
 
     # 거래대금 상위 10
     tradeval_top = [
-        {"ticker": t, "name": s["name"], "index": s["index"], "ccy": s["ccy"],
-         "close": s["close"], "chg_pct": s["chg_pct"], "ret_1w": s.get("ret_1w"),
-         "ret_1m": s.get("ret_1m"),
-         "mktcap_b": s.get("mktcap_b"),
-         "dollar_vol_b": (s.get("trade_val_lm") / 1000) if s.get("trade_val_lm") else None,
-         "signal": "거래대금상위"}
+        _eu_entry(t, s, "거래대금상위")
         for t, s in sorted(
             ((k, v) for k, v in stats.items() if v.get("trade_val_lm") is not None),
             key=lambda x: x[1]["trade_val_lm"], reverse=True
         )[:10]
     ]
 
-    # 거래대금 급증 + 급등락 (surge_ratio ≥ 1.5 & |chg| ≥ 2%)
+    # 거래대금 급증 + 급등락 (surge_ratio ≥ 1.3 & |chg| ≥ 1.0%)
     surge_cands = [
         (t, s) for t, s in stats.items()
-        if s.get("surge_ratio") and s["surge_ratio"] >= 1.5
-        and abs(s["chg_pct"]) >= 2.0
+        if s.get("surge_ratio") and s["surge_ratio"] >= 1.3
+        and abs(s["chg_pct"]) >= 1.0
     ]
-    surge_cands.sort(key=lambda x: x[1]["surge_ratio"], reverse=True)
+    # 급증배율 × 등락폭 복합 스코어 기준 상위 10개
+    surge_cands.sort(key=lambda x: x[1]["surge_ratio"] * abs(x[1]["chg_pct"]), reverse=True)
     turnover_surge = []
     for t, s in surge_cands[:10]:
         signals = []
         if s["chg_pct"] >= 3:    signals.append("급등")
         elif s["chg_pct"] <= -3: signals.append("급락")
         signals.append(f"거래대금{s['surge_ratio']:.1f}x")
-        turnover_surge.append({
-            "ticker": t, "name": s["name"], "index": s["index"], "ccy": s["ccy"],
-            "close": s["close"], "chg_pct": s["chg_pct"], "ret_1w": s.get("ret_1w"),
-            "ret_1m": s.get("ret_1m"),
-            "surge_ratio": s["surge_ratio"],
-            "dollar_vol_b": (s.get("trade_val_lm") / 1000) if s.get("trade_val_lm") else None,
-            "signal": "+".join(signals),
-        })
+        e = _eu_entry(t, s, "+".join(signals))
+        turnover_surge.append(e)
 
     print(f"    [europe screening] 시총상위 {len(mktcap_top)} | 거래대금상위 {len(tradeval_top)} | "
           f"급증 {len(turnover_surge)}")
@@ -1542,7 +1644,6 @@ def fetch_europe_stocks(target_date: str) -> dict:
 # ================================================================== #
 
 SPX_CSV_PATH = Path(os.environ.get("SPX_CSV_PATH", BASE_DIR / "data" / "spx_constituents_prices.csv"))
-EPS_CACHE_DAYS = 7
 
 # LSEG RIC suffix 제거 + 특수 케이스 처리
 _RIC_SPECIALS = {
@@ -1550,9 +1651,11 @@ _RIC_SPECIALS = {
     "BFb":  "BF-B",  "BFa":  "BF-A",
     "WAT_z": None,   # 제외
 }
+# yfinance ticker → LSEG RIC base (for 3M EPS query that needs RIC format)
+_YF_TO_RIC_BASE: dict[str, str] = {v: k for k, v in _RIC_SPECIALS.items() if v is not None}
 
 def _load_eps_cache() -> dict:
-    """DB에서 EPS 캐시 로드. {ticker: {eps_chg_1w, fetched_date}}"""
+    """DB에서 EPS 캐시 로드. {ticker: {eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date}}"""
     try:
         from db.db_manager import DBManager
         return DBManager().get_eps_cache()
@@ -1561,7 +1664,7 @@ def _load_eps_cache() -> dict:
 
 
 def _save_eps_cache(records: list[dict]):
-    """DB에 EPS 캐시 저장. records: [{ticker, eps_chg_1w, fetched_date}]"""
+    """DB에 EPS 캐시 저장. records: [{ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date}]"""
     try:
         from db.db_manager import DBManager
         DBManager().upsert_eps_cache(records)
@@ -1569,8 +1672,45 @@ def _save_eps_cache(records: list[dict]):
         print(f"    [eps cache save ERROR] {e}")
 
 
+def calc_eps_changes(target_date: str, estimates: dict[str, float]) -> dict[str, dict]:
+    """NTM EPS 원본 추정치 히스토리에서 1주/4주(1M)/12주(3M) 전 대비 변화율을 파생 계산.
+
+    Parameters
+    ----------
+    target_date : 이번 스냅샷 기준일 (금요일, YYYY-MM-DD)
+    estimates   : 이번 스냅샷의 {ticker: eps_mean_est}
+
+    Returns
+    -------
+    dict  {ticker: {eps_chg_1w, eps_chg_1m, eps_chg_3m}}
+    """
+    from db.db_manager import DBManager
+    db = DBManager()
+    td = pd.Timestamp(target_date)
+    windows = {"eps_chg_1w": 1, "eps_chg_1m": 4, "eps_chg_3m": 12}
+    baselines = {
+        key: db.get_eps_estimates_at((td - pd.Timedelta(weeks=n)).strftime("%Y-%m-%d"))
+        for key, n in windows.items()
+    }
+    result = {}
+    for ticker, cur in estimates.items():
+        if cur is None:
+            continue
+        row = {}
+        for key, base_map in baselines.items():
+            base = base_map.get(ticker)
+            row[key] = round((cur - base) / base * 100, 2) if base else None
+        result[ticker] = row
+    return result
+
+
 def _is_eps_cache_fresh(cache: dict, target_date: str) -> bool:
-    """캐시가 EPS_CACHE_DAYS 이내인지 확인."""
+    """EPS 캐시는 매주 금요일 종가 기준으로만 갱신한다 (획일화).
+
+    target_date(수집 대상 거래일)가 금요일이 아니면 직전 캐시를 그대로 사용.
+    금요일이면 이미 그 금요일 데이터로 갱신됐는지 확인하고, 아직이면
+    뉴욕 마감 데이터가 확정되는 KST 06:00 이후에만 재수집을 허용한다.
+    """
     if not cache:
         return False
     sample = next(iter(cache.values()), {})
@@ -1578,8 +1718,23 @@ def _is_eps_cache_fresh(cache: dict, target_date: str) -> bool:
     if not fetched:
         return False
     try:
-        delta = (pd.Timestamp(target_date) - pd.Timestamp(fetched)).days
-        return delta < EPS_CACHE_DAYS
+        # eps_chg_3m이 캐시 전체에서 전혀 없으면 (스키마 변경 등) 재수집 필요 (요일 무관)
+        has_3m = sum(1 for v in cache.values() if v.get("eps_chg_3m") is not None)
+        if has_3m == 0:
+            print(f"    [eps cache] eps_chg_3m 없음 → LSEG 3M 재수집")
+            return False
+
+        if pd.Timestamp(target_date).weekday() != 4:   # 4 = 금요일
+            return True
+
+        if fetched == target_date:
+            return True
+
+        if datetime.now(KST).hour < 6:
+            print(f"    [eps cache] 금요일 종가 확정 대기 (KST 06:00 이전) → 기존 캐시 유지")
+            return True
+
+        return False
     except Exception:
         return False
 
@@ -1594,13 +1749,13 @@ def _ric_to_yf(ric: str) -> str | None:
 def _load_spx_universe() -> list[str]:
     """SPX 구성종목 yfinance ticker 목록.
 
-    us_stocks_daily DB 우선 → 없으면 collect_us_stocks.load_spx_tickers() 폴백.
+    market_daily(us/stock) DB 우선 → 없으면 collect_us_stocks.load_spx_tickers() 폴백.
     """
     try:
         from db.db_manager import DBManager
         conn = DBManager()._connect()
         rows = conn.execute(
-            "SELECT DISTINCT ticker FROM us_stocks_daily ORDER BY ticker"
+            "SELECT DISTINCT name FROM market_daily WHERE session='us' AND category='stock' ORDER BY name"
         ).fetchall()
         conn.close()
         tickers = [r[0] for r in rows]
@@ -1652,10 +1807,12 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
                    target_date: str = None,
                    eps_universe: list[str] = None) -> dict[str, dict]:
     """
-    LSEG get_data로 시총 + EPS 추정치 변화 수집.
-    - TR.CompanyMarketCap : billion USD 단위 (mktcap_rics 대상)
-    - TR.MeanPctChg WP=30d: 30일 EPS 변화율 핵심 (eps_universe 전체)
-    - TR.MeanPctChg WP=7d : 7일 EPS 변화율 서브  (eps_universe 전체)
+    LSEG get_data로 시총 + EPS 추정치(NTM 원본값) 수집.
+    - TR.CompanyMarketCap  : billion USD 단위 (mktcap_rics 대상)
+    - TR.EPSMeanEstimate   : NTM EPS 평균 추정치 원본값 (eps_universe 전체)
+
+    1주/1개월/3개월 EPS 변화율은 이 원본값을 주간(금요일) 스냅샷으로 누적한 뒤
+    DB 히스토리에서 N주 전 값과 비교해 파생 계산한다 (calc_eps_changes 참고).
 
     Parameters
     ----------
@@ -1672,7 +1829,7 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
 
     # result는 mktcap + eps 전체 합집합
     all_tickers = list(dict.fromkeys(mktcap_cands + eps_cands))
-    result: dict[str, dict] = {t: {"mktcap_b": None, "eps_chg_1m": None, "eps_chg_1w": None,
+    result: dict[str, dict] = {t: {"mktcap_b": None, "eps_mean_est": None,
                                    "name": None, "sector": None}
                                for t in all_tickers}
     session_opened = False
@@ -1706,7 +1863,11 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
                             ticker = str(row.get("Instrument", "")).strip()
                             mktcap = row.get("Company Market Cap")
                             if ticker and pd.notna(mktcap):
-                                result.setdefault(ticker, {})["mktcap_b"] = round(float(mktcap) / 1e9, 2)  # → USD B
+                                _mb = round(float(mktcap) / 1e9, 2)
+                                if _mb <= 15000:  # $15T 초과 → LSEG 이상값, 버림
+                                    result.setdefault(ticker, {})["mktcap_b"] = _mb
+                                else:
+                                    print(f"    [mktcap sanity] {ticker} mktcap_b={_mb:.0f}B → 이상값 버림")
                             name = None
                             for name_candidate in (
                                 row.get("Company Common Name"),
@@ -1731,50 +1892,68 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
                 mktcap_failed.extend(batch)
             time.sleep(0.5)
 
+        # LSEG 배치 성공했지만 개별 종목 mktcap 누락 → yfinance fallback에 추가
+        mktcap_no_data = [t for t in mktcap_cands
+                          if not result.get(t, {}).get("mktcap_b") and t not in mktcap_failed]
+        if mktcap_no_data:
+            mktcap_failed.extend(mktcap_no_data)
+
         if mktcap_failed:
             print(f"    [yf mktcap fallback] {len(mktcap_failed)}개 yfinance 보강 중...")
             for tk in mktcap_failed:
                 try:
-                    fi = _yf_mc.Ticker(tk).fast_info
-                    mc = fi.get("market_cap") if hasattr(fi, "get") else getattr(fi, "market_cap", None)
+                    tk_obj = _yf_mc.Ticker(tk)
+                    fi = tk_obj.fast_info
+                    mc = getattr(fi, "market_cap", None)  # fi.get()은 항상 None 반환하는 버그
                     if mc:
-                        result.setdefault(tk, {})["mktcap_b"] = round(float(mc) / 1e9, 2)
+                        _mb = round(float(mc) / 1e9, 2)
+                        if _mb <= 15000:
+                            result.setdefault(tk, {})["mktcap_b"] = _mb
+                    if not result.get(tk, {}).get("name"):
+                        try:
+                            info = tk_obj.info
+                            nm = info.get("shortName") or info.get("longName")
+                            if nm:
+                                result.setdefault(tk, {})["name"] = str(nm)[:40]
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 time.sleep(0.2)
 
-        # ── EPS 추정치 배치 수집 (전체 eps_universe, batch_size=20, retry×2) ─
+        # ── EPS 추정치 원본값 배치 수집 (전체 eps_universe, batch_size=20, retry×2) ─
+        # TR.EPSMeanEstimate는 LSEG RIC 포맷(.O/.N)에서만 안정적으로 resolve됨
+        # (bare yfinance 티커는 다수가 "Unable to resolve" 실패 — 배치 내 일부만 우연히 성공)
         if fetch_eps:
-            print(f"    [LSEG eps] {len(eps_cands)}개 종목 1M+1W EPS 조회 중...")
-            eps_params_list = [
-                ("1m", {"EstimateMeasure": "EPS", "Period": "NTM", "WP": "30d",
-                        **({"Sdate": target_date} if target_date else {})}),
-                ("1w", {"EstimateMeasure": "EPS", "Period": "NTM", "WP": "7d",
-                        **({"Sdate": target_date} if target_date else {})}),
-            ]
+            print(f"    [LSEG eps] {len(eps_cands)}개 종목 NTM EPS 추정치 조회 중...")
+            eps_params = {"Period": "NTM", **({"Sdate": target_date} if target_date else {})}
             eps_batch = 20
-            for label, params in eps_params_list:
-                field_key = f"eps_chg_{label}"
-                for i in range(0, len(eps_cands), eps_batch):
-                    batch = eps_cands[i:i + eps_batch]
-                    for attempt in range(2):
-                        try:
-                            part = ld.get_data(
-                                universe=batch,
-                                fields="TR.MeanPctChg",
-                                parameters=params,
-                            )
-                            if part is not None and not part.empty:
-                                for _, row in part.iterrows():
-                                    ticker = str(row.get("Instrument", "")).strip()
-                                    val = row.get("Mean Estimate Pct Change")
-                                    if ticker and pd.notna(val) and val is not None:
-                                        result.setdefault(ticker, {})[field_key] = round(float(val), 2)
-                            break
-                        except Exception as be:
-                            print(f"    [LSEG eps_{label} BATCH ERROR i={i} attempt={attempt+1}] {be}")
-                            if attempt == 0:
-                                time.sleep(3)
+            for i in range(0, len(eps_cands), eps_batch):
+                batch_yf = eps_cands[i:i + eps_batch]
+                # .O(NASDAQ) / .N(NYSE) 두 suffix 동시 시도
+                batch = []
+                for tk in batch_yf:
+                    base = _YF_TO_RIC_BASE.get(tk, tk)
+                    batch.extend([f"{base}.O", f"{base}.N"])
+                for attempt in range(2):
+                    try:
+                        part = ld.get_data(
+                            universe=batch,
+                            fields="TR.EPSMeanEstimate",
+                            parameters=eps_params,
+                        )
+                        if part is not None and not part.empty:
+                            for _, row in part.iterrows():
+                                ric = str(row.get("Instrument", "")).strip()
+                                ticker = _ric_to_yf(ric)   # RIC→yf 변환 ('AAPL.O'→'AAPL', 'BRKb.N'→'BRK-B')
+                                val = row.get("Earnings Per Share - Mean Estimate")
+                                if ticker and val is not None and pd.notna(val):
+                                    result.setdefault(ticker, {})["eps_mean_est"] = round(float(val), 4)
+                        break
+                    except Exception as be:
+                        print(f"    [LSEG eps BATCH ERROR i={i} attempt={attempt+1}] {be}")
+                        if attempt == 0:
+                            time.sleep(3)
 
     except Exception as e:
         print(f"    [LSEG screener ERROR] {e}")
@@ -1841,12 +2020,19 @@ def fetch_us_stocks(
         if df is None or len(df) < 1:
             continue
         close = float(df["Close"].iloc[-1])
-        chg_pct = None
+        chg_pct = ret_1w = ret_1m = None
         if len(df) >= 2:
             prev = float(df["Close"].iloc[-2])
             chg_pct = round((close - prev) / abs(prev) * 100, 2) if prev else None
+        if len(df) >= 6:
+            c_1w = float(df["Close"].iloc[-6])
+            ret_1w = round((close - c_1w) / abs(c_1w) * 100, 2) if c_1w else None
+        if len(df) >= 2:
+            c_1m = float(df["Close"].iloc[0])
+            ret_1m = round((close - c_1m) / abs(c_1m) * 100, 2) if c_1m else None
         sectors.append({"ticker": ticker, "name": meta_name,
-                        "close": round(close, 2), "chg_pct": chg_pct})
+                        "close": round(close, 2), "chg_pct": chg_pct,
+                        "ret_1w": ret_1w, "ret_1m": ret_1m})
     sectors.sort(key=lambda x: (x["chg_pct"] or 0), reverse=True)
 
     # ── 2. SPX 유니버스 로드 + 5일 데이터 다운로드 ──────────────────
@@ -1896,17 +2082,18 @@ def fetch_us_stocks(
         chg_pct    = round((close - prev) / abs(prev) * 100, 2)
         dollar_vol = close * volume
 
-        # 4~5일 평균 거래대금 (오늘 제외)
-        hist_dvol  = (df["Close"] * df["Volume"]).iloc[:-1]
-        avg_dvol   = float(hist_dvol.mean()) if len(hist_dvol) > 0 else 0
-        surge_ratio = round(dollar_vol / avg_dvol, 2) if avg_dvol > 0 else 0
+        # 최근 5거래일 평균 거래대금 (오늘 제외)
+        hist_dvol    = (df["Close"] * df["Volume"]).iloc[:-1].dropna()
+        avg_dvol_5d  = float(hist_dvol.tail(5).mean()) if len(hist_dvol) >= 2 else 0
+        surge_ratio  = round(dollar_vol / avg_dvol_5d, 2) if avg_dvol_5d > 0 else 0
 
         stats[ticker] = {
-            "close":       round(close, 2),
-            "chg_pct":     chg_pct,
-            "volume":      int(volume),
-            "dollar_vol":  dollar_vol,
-            "surge_ratio": surge_ratio,
+            "close":        round(close, 2),
+            "chg_pct":      chg_pct,
+            "volume":       int(volume),
+            "dollar_vol":   dollar_vol,
+            "avg_dvol_5d":  avg_dvol_5d,
+            "surge_ratio":  surge_ratio,
         }
 
     # ── 거래대금 하한 필터 ($30M USD, SPX P5~P7) ────────────────────────
@@ -1945,7 +2132,7 @@ def fetch_us_stocks(
     # 거래대금 상위 100개만 LSEG 조회 (전체 조회는 부하 과다)
     cands_by_dvol = sorted(stats.keys(), key=lambda t: stats[t]["dollar_vol"], reverse=True)[:100]
 
-    # EPS 주간 캐시 확인: 7일 이내 캐시가 있으면 LSEG EPS 호출 생략
+    # EPS 주간 캐시 확인: 금요일 종가 기준 캐시(KST 토요일 06:00 이후 갱신)가 있으면 LSEG EPS 호출 생략
     eps_cache = _load_eps_cache()
     cache_fresh = _is_eps_cache_fresh(eps_cache, target_date)
     if cache_fresh:
@@ -1965,16 +2152,25 @@ def fetch_us_stocks(
     if cache_fresh:
         for ticker in cands_by_dvol:
             if ticker in eps_cache:
-                lseg_meta.setdefault(ticker, {})["eps_chg_1m"] = eps_cache[ticker].get("eps_chg_1m")
                 lseg_meta.setdefault(ticker, {})["eps_chg_1w"] = eps_cache[ticker].get("eps_chg_1w")
+                lseg_meta.setdefault(ticker, {})["eps_chg_1m"] = eps_cache[ticker].get("eps_chg_1m")
+                lseg_meta.setdefault(ticker, {})["eps_chg_3m"] = eps_cache[ticker].get("eps_chg_3m")
     else:
-        # 새로 수집된 EPS 전체를 DB 캐시에 저장
-        new_records = [
-            {"ticker": t, "eps_chg_1m": meta.get("eps_chg_1m"),
-             "eps_chg_1w": meta.get("eps_chg_1w"), "fetched_date": target_date}
-            for t, meta in lseg_meta.items()
-            if meta.get("eps_chg_1m") is not None or meta.get("eps_chg_1w") is not None
-        ]
+        # 새로 수집된 NTM EPS 원본값 → 1주/4주/12주 전 스냅샷과 비교해 변화율 파생 계산 후 DB 저장
+        estimates = {t: meta.get("eps_mean_est") for t, meta in lseg_meta.items()
+                     if meta.get("eps_mean_est") is not None}
+        changes = calc_eps_changes(target_date, estimates)
+        new_records = []
+        for t, est in estimates.items():
+            chg = changes.get(t, {})
+            new_records.append({
+                "ticker": t, "eps_mean_est": est,
+                "eps_chg_1w": chg.get("eps_chg_1w"),
+                "eps_chg_1m": chg.get("eps_chg_1m"),
+                "eps_chg_3m": chg.get("eps_chg_3m"),
+                "fetched_date": target_date,
+            })
+            lseg_meta.setdefault(t, {}).update(chg)
         if new_records:
             _save_eps_cache(new_records)
             print(f"    [eps cache] {len(new_records)}개 종목 DB 저장 (전체 유니버스)")
@@ -1994,6 +2190,8 @@ def fetch_us_stocks(
                 c_1m = float(df_t["Close"].iloc[0])
                 if c_1m > 0:
                     ret_1m = round((c1 - c_1m) / c_1m * 100, 2)
+        _avg5d = s.get("avg_dvol_5d") or 0
+        _sr    = s.get("surge_ratio") or 0
         return {
             "ticker":       ticker,
             "name":         m.get("name") or ticker,
@@ -2003,10 +2201,12 @@ def fetch_us_stocks(
             "ret_1w":       ret_1w,
             "ret_1m":       ret_1m,
             "dollar_vol_b": round(s["dollar_vol"] / 1e9, 2),
-            "surge_ratio":  s["surge_ratio"],
+            "avg_dvol_b":   round(_avg5d / 1e9, 2) if _avg5d > 0 else None,
+            "tv_chg_pct":   round((_sr - 1) * 100, 1) if _sr > 0 else None,
+            "surge_ratio":  _sr,
             "mktcap_b":     m.get("mktcap_b"),
             "eps_chg_1m":   m.get("eps_chg_1m"),
-            "eps_chg_1w":   m.get("eps_chg_1w"),
+            "eps_chg_3m":   m.get("eps_chg_3m"),
             "signal":       signal,
         }
 
@@ -2065,6 +2265,7 @@ def fetch_us_stocks(
     for t in (eps_up[:10] + eps_down[:10]):
         chg_1m = lseg_meta[t]["eps_chg_1m"]
         e = _entry(t, f"EPS{'상향' if chg_1m > 0 else '하향'}1M{chg_1m:+.1f}%")
+
         # 7일 누적 수익률
         df_t = stock_data.get(t)
         if df_t is not None and len(df_t) >= 2:
@@ -2075,8 +2276,54 @@ def fetch_us_stocks(
             e["return_7d"] = None
         eps_revision.append(e)
 
+    # ── turnover_surge mktcap fallback (LSEG top-100 외 종목 보완) ──────
+    import time as _t_surge
+    _need_mc_surge = [e["ticker"] for e in turnover_surge if not e.get("mktcap_b")]
+    if _need_mc_surge:
+        print(f"    [us surge mktcap yf fallback] {len(_need_mc_surge)}개 종목 yfinance 조회...")
+        import yfinance as _yf_surge
+        for _tk in _need_mc_surge:
+            try:
+                _fi = _yf_surge.Ticker(_tk).fast_info
+                _mc = getattr(_fi, "market_cap", None)
+                if _mc:
+                    _mb = round(float(_mc) / 1e9, 2)
+                    if _mb <= 15000:
+                        lseg_meta.setdefault(_tk, {})["mktcap_b"] = _mb
+                        for _e in turnover_surge:
+                            if _e["ticker"] == _tk:
+                                _e["mktcap_b"] = _mb
+                                break
+            except Exception:
+                pass
+            _t_surge.sleep(0.15)
+
     print(f"    [us screening] 시총상위 {len(mktcap_top)} | 거래대금상위 {len(tradeval_top)} | "
           f"급증 {len(turnover_surge)} | EPS {len(eps_revision)}")
+
+    # ── 9. 종목명 yfinance 폴백 (LSEG 미조회 종목 대상) ─────────────
+    import time as _us_t
+    _need_name = set()
+    for lst in [mktcap_top, tradeval_top, turnover_surge, eps_revision]:
+        for e in lst:
+            if not e.get("name") or e["name"] == e["ticker"]:
+                _need_name.add(e["ticker"])
+    if _need_name:
+        print(f"    [us name fallback] {len(_need_name)}개 종목 yfinance 이름 조회...")
+        _yf_names: dict[str, str] = {}
+        for tk in _need_name:
+            try:
+                info = yf.Ticker(tk).info
+                nm = info.get("shortName") or info.get("longName")
+                if nm:
+                    _yf_names[tk] = str(nm)[:40]
+            except Exception:
+                pass
+            _us_t.sleep(0.15)
+        for lst in [mktcap_top, tradeval_top, turnover_surge, eps_revision]:
+            for e in lst:
+                if e["ticker"] in _yf_names:
+                    e["name"] = _yf_names[e["ticker"]]
 
     return {
         "sectors":        sectors,

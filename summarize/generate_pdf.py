@@ -32,6 +32,22 @@ def _sanitize_emoji(text: str) -> str:
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+
+def _ensure_table_blank_lines(text: str) -> str:
+    """표 헤더 행 앞에 빈 줄이 없으면 삽입 — python-markdown tables 확장 요건."""
+    lines = text.split('\n')
+    out = []
+    for i, line in enumerate(lines):
+        # 표 헤더 감지: pipe 행 + 다음 행이 구분자(|---|)
+        if (line.startswith('|')
+                and i + 1 < len(lines)
+                and lines[i + 1].startswith('|')
+                and '---' in lines[i + 1]
+                and out and out[-1].strip() != ''):
+            out.append('')
+        out.append(line)
+    return '\n'.join(out)
+
 # ── 스타일시트 ──────────────────────────────────────────────────────────────
 _CSS = """
 /* Korean font: 서버에 Noto CJK 없으면 sans-serif fallback */
@@ -83,6 +99,7 @@ table {
     border-collapse: collapse;
     margin: 5px 0 11px;
     font-size: 7.8pt;
+    page-break-inside: avoid;
 }
 th {
     background: #1b4f72;
@@ -163,7 +180,7 @@ def generate_pdf(content: str, title: str, save_path: "Path | None" = None) -> b
     from weasyprint import HTML
 
     body_html = _md.markdown(
-        _sanitize_emoji(content),
+        _ensure_table_blank_lines(_sanitize_emoji(content)),
         extensions=["tables", "fenced_code", "nl2br"],
     )
     html_str  = _build_html(body_html, title)

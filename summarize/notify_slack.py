@@ -25,8 +25,10 @@ sys.path.insert(0, str(BASE_DIR))
 
 from db.db_manager import DBManager
 
-WEBHOOK_URL     = os.getenv("SLACK_WEBHOOK_URL", "")
-OPS_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL_MARKET_WATCH_OPS", "")
+WEBHOOK_URL       = os.getenv("SLACK_WEBHOOK_URL", "")
+OPS_WEBHOOK_URL   = os.getenv("SLACK_WEBHOOK_URL_MARKET_WATCH_OPS", "")
+BOT_TOKEN         = os.getenv("SLACK_BOT_TOKEN", "")
+BRIEFING_CHANNEL  = os.getenv("SLACK_BRIEFING_CHANNEL", "")
 
 SESSION_EMOJI = {
     "asia":   "🌏",
@@ -261,6 +263,60 @@ def send_briefing(briefing_id: int = None, text: str = None,
           f"메시지 {len(messages)}개) ✓")
 
     return True
+
+
+def send_pdf(
+    pdf_source: "bytes | Path | str",
+    title: str,
+    comment: str = "",
+    channel: str = "",
+    filename: str = "",
+) -> bool:
+    """PDF 파일을 Slack에 업로드 (Bot Token 사용).
+
+    Parameters
+    ----------
+    pdf_source : PDF 바이너리(bytes) 또는 파일 경로(str/Path)
+    title      : Slack에 표시될 파일 제목
+    comment    : 파일과 함께 보낼 메시지
+    channel    : 채널 ID (기본: SLACK_BRIEFING_CHANNEL)
+    filename   : 저장 파일명 (기본: title 기반 자동 생성)
+    """
+    from slack_sdk import WebClient
+    from slack_sdk.errors import SlackApiError
+    import tempfile
+
+    if not BOT_TOKEN:
+        raise RuntimeError("SLACK_BOT_TOKEN이 .env에 없습니다.")
+    ch = channel or BRIEFING_CHANNEL
+    if not ch:
+        raise RuntimeError("SLACK_BRIEFING_CHANNEL이 .env에 없습니다.")
+
+    fname = filename or f"{title.replace(' ', '_')}.pdf"
+    client = WebClient(token=BOT_TOKEN)
+
+    try:
+        if isinstance(pdf_source, bytes):
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(pdf_source)
+                tmp_path = tmp.name
+            resp = client.files_upload_v2(
+                channel=ch, file=tmp_path,
+                filename=fname, title=title, initial_comment=comment,
+            )
+            Path(tmp_path).unlink(missing_ok=True)
+        else:
+            resp = client.files_upload_v2(
+                channel=ch, file=str(pdf_source),
+                filename=fname, title=title, initial_comment=comment,
+            )
+        ok = resp.get("ok", False)
+        if ok:
+            print(f"[notify_slack] PDF 업로드 완료: {fname} → #{ch}")
+        return ok
+    except SlackApiError as e:
+        print(f"[notify_slack] PDF 업로드 실패: {e.response['error']}")
+        raise
 
 
 def send_text(text: str) -> bool:

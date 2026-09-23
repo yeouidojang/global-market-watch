@@ -226,7 +226,7 @@ def run_session(session: str, target_date: str,
 
     # Block C: SPX OHLCV (핵심 — US 종목 스크리닝 필수)
     if session == "us":
-        print(f"\n[1/4-spx] SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)")
+        print(f"\n[1/4-spx] SPX 전 종목 OHLCV 수집 (yfinance → market_daily)")
         _, _err = _run_collect_block(
             "SPX OHLCV", lambda: __import__("exe.collect_us_stocks", fromlist=["run"]).run(target_date, target_date),
             ops=ops, ops_label="[수집] SPX OHLCV"
@@ -375,29 +375,34 @@ def run_session(session: str, target_date: str,
         if ops: ops.warn("[4] Slack", "skip (--no-notify)")
         return
 
-    print(f"\n[4/4] Slack + ClickUp 발송")
-    from summarize.notify_slack import send_briefing
+    print(f"\n[4/4] PDF 생성 → Slack 발송")
+    from summarize.generate_pdf import generate_pdf
+    from summarize.notify_slack import send_pdf
     latest = db.get_latest_briefing(session)
     if latest:
-        if session == "asia":
-            txt_path = _archive_briefing_text(
-                session=session,
-                target_date=target_date,
-                briefing_id=latest["id"],
-                content=latest.get("content", content),
-            )
-            print(f"  [txt 저장] {txt_path}")
-        send_briefing(briefing_id=latest["id"], session=session, date=target_date)
-        if ops: ops.ok("[4] Slack 브리핑 발송", f"id={latest['id']}")
+        _content = latest.get("content", content)
+        _title   = f"{target_date} {session.upper()} 시황 브리핑"
 
-    if session != "europe":
-        try:
-            from summarize.notify_clickup import send_briefing_pdf
-            send_briefing_pdf(content=content, session=session, date=target_date)
-            if ops: ops.ok("[4] ClickUp PDF 발송")
-        except Exception as _cu_e:
-            print(f"  [ClickUp PDF 발송 ERROR] {_cu_e}")
-            if ops: ops.warn("[4] ClickUp PDF", str(_cu_e)[:80])
+        txt_path = _archive_briefing_text(
+            session=session,
+            target_date=target_date,
+            briefing_id=latest["id"],
+            content=_content,
+        )
+        print(f"  [txt 저장] {txt_path}")
+
+        pdf_save = BASE_DIR / "logs" / "briefings_pdf" / session / f"{target_date}.pdf"
+        pdf_bytes = generate_pdf(_content, _title, save_path=pdf_save)
+        print(f"  [pdf 저장] {pdf_save}")
+
+        _emoji = {"asia": "🌏", "europe": "🇪🇺", "us": "🇺🇸"}.get(session, "📊")
+        send_pdf(
+            pdf_source=pdf_bytes,
+            title=_title,
+            comment=f"{_emoji} *{_title}*",
+            filename=f"{target_date}_{session}_briefing.pdf",
+        )
+        if ops: ops.ok("[4] Slack PDF 발송", f"id={latest['id']}")
 
     print(f"\n✅ 완료: {session.upper()} 세션 파이프라인")
 
@@ -474,7 +479,7 @@ def run_global_pipeline(target_date: str,
             lseg_close()
 
     # Block D: SPX OHLCV (핵심)
-    print(f"\n[1/5-spx] SPX 전 종목 OHLCV 수집 (yfinance → us_stocks_daily)")
+    print(f"\n[1/5-spx] SPX 전 종목 OHLCV 수집 (yfinance → market_daily)")
     _, _err = _run_collect_block(
         "SPX OHLCV", lambda: __import__("exe.collect_us_stocks", fromlist=["run"]).run(target_date, target_date),
         ops=ops, ops_label="[수집] SPX OHLCV"
@@ -597,27 +602,33 @@ def run_global_pipeline(target_date: str,
         print(f"\n✅ 완료: GLOBAL 통합 파이프라인 (Slack 미발송)")
         return
 
-    print(f"\n[5/5] Slack + ClickUp 발송 (Global 통합 브리핑 1건)")
-    from summarize.notify_slack import send_briefing
+    print(f"\n[5/5] PDF 생성 → Slack 발송 (Global 통합 브리핑 1건)")
+    from summarize.generate_pdf import generate_pdf
+    from summarize.notify_slack import send_pdf
     latest = db.get_latest_briefing("global")
     if latest:
+        _content = latest.get("content", us_content)
+        _title   = f"{target_date} GLOBAL 시황 브리핑"
+
         txt_path = _archive_briefing_text(
             session="global",
             target_date=target_date,
             briefing_id=latest["id"],
-            content=latest.get("content", us_content),
+            content=_content,
         )
         print(f"  [txt 저장] {txt_path}")
-        send_briefing(briefing_id=latest["id"], session="global", date=target_date)
-        if ops: ops.ok("[5] Slack 브리핑 발송", f"id={latest['id']}")
 
-    try:
-        from summarize.notify_clickup import send_briefing_pdf
-        send_briefing_pdf(content=us_content, session="global", date=target_date)
-        if ops: ops.ok("[5] ClickUp PDF 발송")
-    except Exception as _cu_e:
-        print(f"  [ClickUp PDF 발송 ERROR] {_cu_e}")
-        if ops: ops.warn("[5] ClickUp PDF", str(_cu_e)[:80])
+        pdf_save = BASE_DIR / "logs" / "briefings_pdf" / "global" / f"{target_date}.pdf"
+        pdf_bytes = generate_pdf(_content, _title, save_path=pdf_save)
+        print(f"  [pdf 저장] {pdf_save}")
+
+        send_pdf(
+            pdf_source=pdf_bytes,
+            title=_title,
+            comment=f"🇺🇸 *{_title}*",
+            filename=f"{target_date}_global_briefing.pdf",
+        )
+        if ops: ops.ok("[5] Slack PDF 발송", f"id={latest['id']}")
 
     print(f"\n✅ 완료: GLOBAL 통합 파이프라인")
 

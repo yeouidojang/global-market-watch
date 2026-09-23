@@ -24,7 +24,7 @@ class DBManager:
         self._init_db()
 
     def _connect(self):
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path, timeout=15.0)
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -44,25 +44,97 @@ class DBManager:
                 conn.execute("ALTER TABLE econ_calendar ADD COLUMN source_id TEXT")
                 conn.commit()
 
-            # UNIQUE INDEX 생성 전 중복 레코드 제거
-            conn.execute("""
-                DELETE FROM econ_calendar
-                WHERE id NOT IN (
-                    SELECT MIN(id)
-                    FROM econ_calendar
-                    GROUP BY event_date, country, indicator
-                )
-            """)
-            conn.commit()
+            # UNIQUE INDEX 생성 전 중복 레코드 제거 (인덱스가 없을 때만 1회 실행)
+            econ_unique_exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_econ_unique'"
+            ).fetchone()
+            if not econ_unique_exists:
+                conn.execute("""
+                    DELETE FROM econ_calendar
+                    WHERE id NOT IN (
+                        SELECT MIN(id)
+                        FROM econ_calendar
+                        GROUP BY event_date, country, indicator
+                    )
+                """)
+                conn.commit()
 
-        # market_daily.market 컬럼 추가 마이그레이션 (executescript 전에 실행)
+        # market_daily 컬럼 마이그레이션 (executescript 전에 실행)
         md_cols = [r[1] for r in conn.execute("PRAGMA table_info(market_daily)").fetchall()]
         if md_cols and "market" not in md_cols:
             conn.execute("ALTER TABLE market_daily ADD COLUMN market TEXT")
             conn.commit()
+        if md_cols and "change_pct" not in md_cols:
+            conn.execute("ALTER TABLE market_daily ADD COLUMN change_pct REAL")
+            conn.commit()
 
-        conn.executescript(schema)
+        # us_stocks_daily → market_daily 통합 마이그레이션
+        has_us_tbl = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='us_stocks_daily'"
+        ).fetchone()
+        if has_us_tbl:
+            conn.execute("""
+                INSERT OR IGNORE INTO market_daily
+                    (date, session, category, name, open, high, low, close, volume)
+                SELECT date, 'us', 'stock', ticker, open, high, low, close, volume
+                FROM us_stocks_daily
+            """)
+            conn.execute("DROP TABLE us_stocks_daily")
+            conn.commit()
+
+        # executescript는 write lock 필요 → 이미 초기화된 경우 skip
+        sentinel = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_market_daily_market'"
+        ).fetchone()
+        if not sentinel:
+            conn.executescript(schema)
+            conn.commit()
+
+        # spx_constituents 테이블 마이그레이션 (sentinel 확정 이후 추가된 테이블 → 개별 생성 필요)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS spx_constituents (
+                ticker       TEXT NOT NULL,
+                fetched_date TEXT NOT NULL,
+                created_at   TEXT DEFAULT (datetime('now','localtime')),
+                PRIMARY KEY (ticker, fetched_date)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_spx_constituents_date ON spx_constituents(fetched_date)"
+        )
         conn.commit()
+
+        # eps_cache PK 확장: (ticker) → (ticker, fetched_date) — 주간(금요일) 히스토리 보관용.
+        # SQLite는 기존 테이블의 PK를 직접 바꿀 수 없어 재생성 후 데이터 이관한다.
+        eps_pk_cols = [r[1] for r in conn.execute("PRAGMA table_info(eps_cache)").fetchall() if r[5] > 0]
+        if eps_pk_cols == ["ticker"]:
+            conn.execute("ALTER TABLE eps_cache RENAME TO eps_cache_old")
+            conn.execute("""
+                CREATE TABLE eps_cache (
+                    ticker       TEXT NOT NULL,
+                    eps_chg_1m   REAL,
+                    eps_chg_1w   REAL,
+                    eps_chg_3m   REAL,
+                    fetched_date TEXT NOT NULL,
+                    created_at   TEXT DEFAULT (datetime('now','localtime')),
+                    PRIMARY KEY (ticker, fetched_date)
+                )
+            """)
+            conn.execute("""
+                INSERT INTO eps_cache (ticker, eps_chg_1m, eps_chg_1w, eps_chg_3m, fetched_date, created_at)
+                SELECT ticker, eps_chg_1m, eps_chg_1w, eps_chg_3m, fetched_date, created_at FROM eps_cache_old
+            """)
+            conn.execute("DROP TABLE eps_cache_old")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_eps_cache_date ON eps_cache(fetched_date)")
+            conn.commit()
+            print("[db_manager] eps_cache PK 확장 완료: (ticker) → (ticker, fetched_date)")
+
+        # eps_cache에 eps_mean_est(NTM 원본 추정치) 컬럼 추가
+        # — 1주/1개월/3개월 변화율을 주간 스냅샷 히스토리에서 파생 계산하기 위함
+        eps_cols = [r[1] for r in conn.execute("PRAGMA table_info(eps_cache)").fetchall()]
+        if eps_cols and "eps_mean_est" not in eps_cols:
+            conn.execute("ALTER TABLE eps_cache ADD COLUMN eps_mean_est REAL")
+            conn.commit()
 
         # briefings UNIQUE(date, session) 마이그레이션
         # — 기존 DB에 UNIQUE 제약이 없는 경우, 중복 제거 후 unique index 생성
@@ -85,11 +157,14 @@ class DBManager:
         # eps_cache JSON → DB 마이그레이션 (최초 1회)
         self._migrate_eps_cache_json(conn)
 
-        # eps_chg_1m, foreign_net, inst_net 컬럼 추가 마이그레이션
+        # eps_chg_1m, eps_chg_3m, foreign_net, inst_net 컬럼 추가 마이그레이션
         for table in ("eps_cache", "stocks_daily"):
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
             if cols and "eps_chg_1m" not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN eps_chg_1m REAL")
+                conn.commit()
+            if cols and "eps_chg_3m" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN eps_chg_3m REAL")
                 conn.commit()
         for col in ("foreign_net", "inst_net"):
             cols = [r[1] for r in conn.execute("PRAGMA table_info(stocks_daily)").fetchall()]
@@ -162,6 +237,27 @@ class DBManager:
         cursor = conn.executemany(sql, records)
         conn.commit()
         count = cursor.rowcount
+
+        # change_pct 재계산: 방금 upsert된 names에 대해 직전 종가 대비 등락률 update
+        names = list({r["name"] for r in records})
+        placeholders = ",".join("?" * len(names))
+        conn.execute(f"""
+            UPDATE market_daily
+            SET change_pct = (
+                SELECT ROUND((market_daily.close - prev.close) / ABS(prev.close) * 100, 4)
+                FROM market_daily AS prev
+                WHERE prev.name = market_daily.name
+                  AND prev.date < market_daily.date
+                  AND prev.close IS NOT NULL
+                  AND prev.close != 0
+                ORDER BY prev.date DESC
+                LIMIT 1
+            )
+            WHERE name IN ({placeholders})
+              AND close IS NOT NULL
+        """, names)
+        conn.commit()
+
         conn.close()
         return count
 
@@ -169,7 +265,7 @@ class DBManager:
         """지정 name 목록의 최근 n_days 데이터 반환."""
         placeholders = ",".join("?" * len(names))
         sql = f"""
-            SELECT date, session, category, name, close, open, high, low
+            SELECT date, session, category, name, close, open, high, low, change_pct
             FROM market_daily
             WHERE name IN ({placeholders})
             ORDER BY date DESC, name
@@ -183,7 +279,7 @@ class DBManager:
     def get_by_date(self, target_date: str) -> pd.DataFrame:
         """특정 날짜의 모든 market_daily 레코드 반환."""
         sql = """
-            SELECT date, session, category, name, close, open, high, low
+            SELECT date, session, category, name, close, open, high, low, change_pct
             FROM market_daily
             WHERE date = ?
             ORDER BY session, category, name
@@ -428,6 +524,8 @@ class DBManager:
                     "mktcap": s.get("mktcap"),
                     "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                     "turnover": s.get("turnover"),
+                    "surge_ratio": s.get("surge_ratio"),
+                    "tv_chg_pct": s.get("tv_chg"),
                     "foreign_net": s.get("foreign_net"),
                     "inst_net": s.get("inst_net"),
                     "signal": s.get("signal"),
@@ -451,6 +549,7 @@ class DBManager:
                     "date": date, "session": session, "category": "sectors",
                     "ticker": s.get("ric", s.get("ticker", "")), "name": s.get("name"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                 })
             # 종목 스크리닝 (market = index 이름: DAX/FTSE/CAC)
             for cat in ("mktcap_top", "tradeval_top", "turnover_surge"):
@@ -464,6 +563,8 @@ class DBManager:
                         "dollar_vol_b": s.get("dollar_vol_b"),
                         "mktcap_b": s.get("mktcap_b"),
                         "surge_ratio": s.get("surge_ratio"),
+                        "avg_dvol_b": s.get("avg_dvol_b"),
+                        "tv_chg_pct": s.get("tv_chg_pct"),
                         "signal": s.get("signal"),
                     })
 
@@ -474,6 +575,7 @@ class DBManager:
                     "date": date, "session": session, "category": "sectors",
                     "ticker": s.get("ticker", ""), "name": s.get("name"),
                     "close": s.get("close"), "chg_pct": s.get("chg_pct"),
+                    "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                 })
             for cat in ("mktcap_top", "tradeval_top", "turnover_surge", "eps_revision"):
                 for s in stocks_data.get(cat, []):
@@ -485,8 +587,10 @@ class DBManager:
                         "dollar_vol_b": s.get("dollar_vol_b"),
                         "mktcap_b": s.get("mktcap_b"),
                         "surge_ratio": s.get("surge_ratio"),
+                        "avg_dvol_b": s.get("avg_dvol_b"),
+                        "tv_chg_pct": s.get("tv_chg_pct"),
                         "eps_chg_1m": s.get("eps_chg_1m"),
-                        "eps_chg_1w": s.get("eps_chg_1w"),
+                        "eps_chg_3m": s.get("eps_chg_3m"),
                         "return_7d": s.get("return_7d"),
                         "signal": s.get("signal"),
                     })
@@ -505,6 +609,7 @@ class DBManager:
                         "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                         "mktcap_b": s.get("mktcap_b"),
                         "dollar_vol_b": s.get("trade_val_b"),
+                        "tv_chg_pct": s.get("tv_chg"),
                     })
             for s in mk_data.get("featured", []):
                 records.append({
@@ -515,6 +620,7 @@ class DBManager:
                     "ret_1w": s.get("ret_1w"), "ret_1m": s.get("ret_1m"),
                     "surge_ratio": s.get("surge_ratio"),
                     "dollar_vol_b": s.get("trade_val_b"),
+                    "tv_chg_pct": s.get("tv_chg"),
                     "signal": s.get("signal"),
                 })
             for s in mk_data.get("sectors", []):
@@ -547,8 +653,12 @@ class DBManager:
         STRIP = ("id", "date", "session", "category", "created_at")
 
         def _clean(rec: dict) -> dict:
-            return {k: v for k, v in rec.items()
-                    if k not in STRIP and v is not None}
+            d = {k: v for k, v in rec.items()
+                 if k not in STRIP and v is not None}
+            # tv_chg_pct → tv_chg alias (briefing/formatting은 tv_chg 키 사용)
+            if "tv_chg_pct" in d:
+                d.setdefault("tv_chg", d["tv_chg_pct"])
+            return d
 
         def _clean_eu(rec: dict) -> dict:
             """Europe 종목: market 컬럼을 index 키로도 노출."""
@@ -607,7 +717,8 @@ class DBManager:
         "date", "session", "category", "ticker", "name", "market",
         "close", "chg_pct", "volume", "trade_val", "dollar_vol_b",
         "mktcap", "mktcap_b", "turnover", "surge_ratio",
-        "eps_chg_1m", "eps_chg_1w", "return_7d",
+        "avg_dvol_b", "tv_chg_pct",
+        "eps_chg_1m", "eps_chg_3m", "return_7d",
         "ret_1w", "ret_1m",
         "foreign_net", "inst_net", "signal",
     )
@@ -635,14 +746,16 @@ class DBManager:
                 (date, session, category, ticker, name, market,
                  close, chg_pct, volume, trade_val, dollar_vol_b,
                  mktcap, mktcap_b, turnover, surge_ratio,
-                 eps_chg_1m, eps_chg_1w, return_7d,
+                 avg_dvol_b, tv_chg_pct,
+                 eps_chg_1m, eps_chg_3m, return_7d,
                  ret_1w, ret_1m,
                  foreign_net, inst_net, signal)
             VALUES
                 (:date, :session, :category, :ticker, :name, :market,
                  :close, :chg_pct, :volume, :trade_val, :dollar_vol_b,
                  :mktcap, :mktcap_b, :turnover, :surge_ratio,
-                 :eps_chg_1m, :eps_chg_1w, :return_7d,
+                 :avg_dvol_b, :tv_chg_pct,
+                 :eps_chg_1m, :eps_chg_3m, :return_7d,
                  :ret_1w, :ret_1m,
                  :foreign_net, :inst_net, :signal)
             ON CONFLICT(date, session, category, ticker) DO UPDATE SET
@@ -656,8 +769,10 @@ class DBManager:
                 mktcap_b     = COALESCE(excluded.mktcap_b,     mktcap_b),
                 turnover     = COALESCE(excluded.turnover,     turnover),
                 surge_ratio  = COALESCE(excluded.surge_ratio,  surge_ratio),
+                avg_dvol_b   = COALESCE(excluded.avg_dvol_b,   avg_dvol_b),
+                tv_chg_pct   = COALESCE(excluded.tv_chg_pct,   tv_chg_pct),
                 eps_chg_1m   = COALESCE(excluded.eps_chg_1m,   eps_chg_1m),
-                eps_chg_1w   = COALESCE(excluded.eps_chg_1w,   eps_chg_1w),
+                eps_chg_3m   = COALESCE(excluded.eps_chg_3m,   eps_chg_3m),
                 return_7d    = COALESCE(excluded.return_7d,    return_7d),
                 ret_1w       = COALESCE(excluded.ret_1w,       ret_1w),
                 ret_1m       = COALESCE(excluded.ret_1m,       ret_1m),
@@ -702,20 +817,23 @@ class DBManager:
 
         Parameters
         ----------
-        records : list of dict  {ticker, eps_chg_1m, eps_chg_1w, fetched_date}
+        records : list of dict  {ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date}
         """
         if not records:
             return 0
         for r in records:
-            r.setdefault("eps_chg_1m", None)
+            r.setdefault("eps_mean_est", None)
             r.setdefault("eps_chg_1w", None)
+            r.setdefault("eps_chg_1m", None)
+            r.setdefault("eps_chg_3m", None)
         sql = """
-            INSERT INTO eps_cache (ticker, eps_chg_1m, eps_chg_1w, fetched_date)
-            VALUES (:ticker, :eps_chg_1m, :eps_chg_1w, :fetched_date)
-            ON CONFLICT(ticker) DO UPDATE SET
-                eps_chg_1m   = excluded.eps_chg_1m,
+            INSERT INTO eps_cache (ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date)
+            VALUES (:ticker, :eps_mean_est, :eps_chg_1w, :eps_chg_1m, :eps_chg_3m, :fetched_date)
+            ON CONFLICT(ticker, fetched_date) DO UPDATE SET
+                eps_mean_est = excluded.eps_mean_est,
                 eps_chg_1w   = excluded.eps_chg_1w,
-                fetched_date = excluded.fetched_date,
+                eps_chg_1m   = excluded.eps_chg_1m,
+                eps_chg_3m   = excluded.eps_chg_3m,
                 created_at   = datetime('now','localtime')
         """
         conn = self._connect()
@@ -727,21 +845,103 @@ class DBManager:
 
     def get_eps_cache(self) -> dict:
         """
-        전체 EPS 캐시 반환.
+        가장 최근 fetched_date 스냅샷의 EPS 캐시 반환 (기존 호출부 호환용).
 
         Returns
         -------
-        dict  {ticker: {eps_chg_1m, eps_chg_1w, fetched_date}}
+        dict  {ticker: {eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date}}
         """
-        sql = "SELECT ticker, eps_chg_1m, eps_chg_1w, fetched_date FROM eps_cache"
+        sql = """
+            SELECT ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date
+            FROM   eps_cache
+            WHERE  fetched_date = (SELECT MAX(fetched_date) FROM eps_cache)
+        """
         conn = self._connect()
         rows = conn.execute(sql).fetchall()
         conn.close()
         return {r["ticker"]: {
-                    "eps_chg_1m":  r["eps_chg_1m"],
-                    "eps_chg_1w":  r["eps_chg_1w"],
+                    "eps_mean_est": r["eps_mean_est"],
+                    "eps_chg_1w":   r["eps_chg_1w"],
+                    "eps_chg_1m":   r["eps_chg_1m"],
+                    "eps_chg_3m":   r["eps_chg_3m"],
                     "fetched_date": r["fetched_date"],
                 } for r in rows}
+
+    def get_eps_estimates_at(self, fetched_date: str) -> dict:
+        """특정 스냅샷 날짜의 {ticker: eps_mean_est} 반환 (N주 전 값 조회용)."""
+        conn = self._connect()
+        rows = conn.execute(
+            "SELECT ticker, eps_mean_est FROM eps_cache WHERE fetched_date = ?",
+            (fetched_date,),
+        ).fetchall()
+        conn.close()
+        return {r["ticker"]: r["eps_mean_est"] for r in rows if r["eps_mean_est"] is not None}
+
+    def get_eps_cache_history(self, fetched_date: str = None) -> pd.DataFrame:
+        """
+        EPS 캐시 히스토리 조회.
+
+        Parameters
+        ----------
+        fetched_date : 특정 스냅샷 날짜만 조회 (None이면 전체 히스토리)
+
+        Returns
+        -------
+        pd.DataFrame  [ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date]
+        """
+        cols = "ticker, eps_mean_est, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date"
+        conn = self._connect()
+        if fetched_date:
+            df = pd.read_sql_query(
+                f"SELECT {cols} FROM eps_cache WHERE fetched_date = ? ORDER BY ticker",
+                conn, params=(fetched_date,),
+            )
+        else:
+            df = pd.read_sql_query(
+                f"SELECT {cols} FROM eps_cache ORDER BY fetched_date, ticker",
+                conn,
+            )
+        conn.close()
+        return df
+
+    # ------------------------------------------------------------------ #
+    #  spx_constituents
+    # ------------------------------------------------------------------ #
+    def upsert_spx_constituents(self, records: list[dict]) -> int:
+        """
+        SPX 구성종목 스냅샷 upsert.
+
+        Parameters
+        ----------
+        records : list of dict  {ticker, fetched_date}
+        """
+        if not records:
+            return 0
+        sql = """
+            INSERT INTO spx_constituents (ticker, fetched_date)
+            VALUES (:ticker, :fetched_date)
+            ON CONFLICT(ticker, fetched_date) DO UPDATE SET
+                created_at = datetime('now','localtime')
+        """
+        conn = self._connect()
+        cursor = conn.executemany(sql, records)
+        conn.commit()
+        count = cursor.rowcount
+        conn.close()
+        return count
+
+    def get_latest_spx_constituents(self) -> list[str]:
+        """가장 최근 fetched_date 스냅샷의 SPX 구성종목 티커 리스트 반환."""
+        conn = self._connect()
+        latest = conn.execute("SELECT MAX(fetched_date) AS d FROM spx_constituents").fetchone()["d"]
+        if not latest:
+            conn.close()
+            return []
+        rows = conn.execute(
+            "SELECT ticker FROM spx_constituents WHERE fetched_date = ? ORDER BY ticker", (latest,)
+        ).fetchall()
+        conn.close()
+        return [r["ticker"] for r in rows]
 
     def get_market_breadth(self, date: str, session: str) -> dict:
         """
@@ -749,27 +949,16 @@ class DBManager:
         당일 + 직전 거래일 종가 비교로 등락률 산출.
         """
         sql = """
-            SELECT t.name,
-                   t.close  AS close_today,
-                   p.close  AS close_prev,
-                   (t.close * COALESCE(t.volume, 0)) AS trade_val
-            FROM market_daily t
-            JOIN market_daily p
-              ON p.name = t.name
-             AND p.session  = :session
-             AND p.category = 'stock'
-             AND p.date = (
-                 SELECT MAX(m2.date) FROM market_daily m2
-                  WHERE m2.name = t.name
-                    AND m2.session  = :session
-                    AND m2.category = 'stock'
-                    AND m2.date < :date
-             )
-            WHERE t.date     = :date
-              AND t.session  = :session
-              AND t.category = 'stock'
-              AND t.close > 0
-              AND p.close > 0
+            SELECT name,
+                   close,
+                   change_pct,
+                   (close * COALESCE(volume, 0)) AS trade_val
+            FROM market_daily
+            WHERE date     = :date
+              AND session  = :session
+              AND category = 'stock'
+              AND close > 0
+              AND change_pct IS NOT NULL
         """
         conn = self._connect()
         rows = conn.execute(sql, {"date": date, "session": session}).fetchall()
@@ -777,8 +966,7 @@ class DBManager:
         if not rows:
             return {}
 
-        chg_list = [(r["close_today"] - r["close_prev"]) / abs(r["close_prev"]) * 100
-                    for r in rows]
+        chg_list = [r["change_pct"] for r in rows]
         tv_list  = [r["trade_val"] or 0 for r in rows]
         up    = sum(1 for c in chg_list if c > 0)
         down  = sum(1 for c in chg_list if c < 0)
@@ -793,80 +981,6 @@ class DBManager:
                 sum(c * tv for c, tv in zip(chg_list, tv_list)) / tv_sum, 2
             ) if tv_sum > 0 else None,
         }
-
-    # ------------------------------------------------------------------ #
-    #  us_stocks_daily
-    # ------------------------------------------------------------------ #
-    def upsert_us_stocks_daily(self, records: list[dict]) -> int:
-        """
-        us_stocks_daily 테이블 upsert.
-
-        Parameters
-        ----------
-        records : list of dict  {date, ticker, open, high, low, close, volume}
-
-        Returns
-        -------
-        int  upsert된 행 수
-        """
-        if not records:
-            return 0
-        records = [
-            {k: (None if isinstance(v, float) and pd.isna(v) else v) for k, v in r.items()}
-            for r in records
-        ]
-        sql = """
-            INSERT INTO us_stocks_daily (date, ticker, open, high, low, close, volume)
-            VALUES (:date, :ticker, :open, :high, :low, :close, :volume)
-            ON CONFLICT(date, ticker) DO UPDATE SET
-                open       = excluded.open,
-                high       = excluded.high,
-                low        = excluded.low,
-                close      = excluded.close,
-                volume     = excluded.volume,
-                created_at = datetime('now','localtime')
-        """
-        conn = self._connect()
-        cursor = conn.executemany(sql, records)
-        conn.commit()
-        count = cursor.rowcount
-        conn.close()
-        return count
-
-    def get_us_stocks_daily(self, start_date: str, end_date: str = None,
-                            tickers: list[str] | None = None) -> pd.DataFrame:
-        """
-        us_stocks_daily 조회.
-
-        Parameters
-        ----------
-        start_date : YYYY-MM-DD
-        end_date   : YYYY-MM-DD (기본: start_date와 동일)
-        tickers    : 조회할 ticker 목록 (None이면 전체)
-
-        Returns
-        -------
-        DataFrame  [date, ticker, open, high, low, close, volume]
-        """
-        end = end_date or start_date
-        params: dict = {"start": start_date, "end": end}
-        ticker_clause = ""
-        if tickers:
-            placeholders = ",".join(f":t{i}" for i in range(len(tickers)))
-            ticker_clause = f"AND ticker IN ({placeholders})"
-            for i, t in enumerate(tickers):
-                params[f"t{i}"] = t
-        sql = f"""
-            SELECT date, ticker, open, high, low, close, volume
-            FROM us_stocks_daily
-            WHERE date BETWEEN :start AND :end
-            {ticker_clause}
-            ORDER BY date, ticker
-        """
-        conn = self._connect()
-        df = pd.read_sql_query(sql, conn, params=params)
-        conn.close()
-        return df
 
     # ─────────────────────────────────────────
     #  market_holidays

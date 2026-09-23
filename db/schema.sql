@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS market_daily (
     high        REAL,
     low         REAL,
     volume      REAL,
+    change_pct  REAL,                   -- 전일 대비 등락률 (%)
     created_at  TEXT DEFAULT (datetime('now','localtime')),
     PRIMARY KEY (date, name)
 );
@@ -78,14 +79,18 @@ CREATE TABLE IF NOT EXISTS stocks_daily (
     UNIQUE (date, session, category, ticker)
 );
 
--- EPS 추정치 주간 캐시 (LSEG TR.MeanPctChg, 7일 단위 수집)
+-- EPS 추정치 주간 히스토리 (LSEG TR.EPSMeanEstimate, 매주 금요일 종가 기준 갱신 — KST 토요일 06:00 이후)
+-- eps_mean_est(NTM 원본값)를 주간 스냅샷으로 쌓고, 1주/1개월/3개월 변화율은
+-- 1/4/12주 전 스냅샷과 비교해 파생 계산한다 (exe/collect_stocks.py calc_eps_changes).
 CREATE TABLE IF NOT EXISTS eps_cache (
     ticker       TEXT NOT NULL,          -- yfinance ticker (AAPL, NVDA 등)
-    eps_chg_1m   REAL,                   -- 30일 EPS 추정치 변화율 (%) ← 핵심
-    eps_chg_1w   REAL,                   -- 7일 EPS 추정치 변화율 (%)  ← 서브
-    fetched_date TEXT NOT NULL,          -- 수집 기준일 YYYY-MM-DD
+    eps_mean_est REAL,                   -- NTM EPS 평균 추정치 원본값
+    eps_chg_1w   REAL,                   -- 1주 전 대비 변화율 (%)
+    eps_chg_1m   REAL,                   -- 4주 전 대비 변화율 (%) ← 핵심
+    eps_chg_3m   REAL,                   -- 12주 전 대비 변화율 (%)
+    fetched_date TEXT NOT NULL,          -- 수집 기준일 YYYY-MM-DD (금요일)
     created_at   TEXT DEFAULT (datetime('now','localtime')),
-    PRIMARY KEY (ticker)
+    PRIMARY KEY (ticker, fetched_date)
 );
 
 -- 어닝 캘린더 (Finnhub earnings_calendar)
@@ -106,17 +111,12 @@ CREATE TABLE IF NOT EXISTS earnings_calendar (
     UNIQUE (event_date, symbol)
 );
 
--- SPX 전 종목 일별 OHLCV (yfinance, ~504종목)
-CREATE TABLE IF NOT EXISTS us_stocks_daily (
-    date        TEXT NOT NULL,          -- YYYY-MM-DD
-    ticker      TEXT NOT NULL,          -- yfinance ticker (AAPL, NVDA, BRK-B 등)
-    open        REAL,
-    high        REAL,
-    low         REAL,
-    close       REAL,
-    volume      REAL,
-    created_at  TEXT DEFAULT (datetime('now','localtime')),
-    PRIMARY KEY (date, ticker)
+-- S&P 500 구성종목 스냅샷 (LSEG Chain RIC 0#.SPX)
+CREATE TABLE IF NOT EXISTS spx_constituents (
+    ticker       TEXT NOT NULL,          -- yfinance ticker (BRK-B 등)
+    fetched_date TEXT NOT NULL,          -- 조회 기준일 YYYY-MM-DD
+    created_at   TEXT DEFAULT (datetime('now','localtime')),
+    PRIMARY KEY (ticker, fetched_date)
 );
 
 -- 시장 휴장일 캘린더 (exchange_calendars 기반)
@@ -131,8 +131,6 @@ CREATE TABLE IF NOT EXISTS market_holidays (
 
 -- 인덱스
 CREATE INDEX IF NOT EXISTS idx_market_holidays_date ON market_holidays(date);
-CREATE INDEX IF NOT EXISTS idx_us_stocks_daily_date   ON us_stocks_daily(date);
-CREATE INDEX IF NOT EXISTS idx_us_stocks_daily_ticker ON us_stocks_daily(ticker);
 CREATE INDEX IF NOT EXISTS idx_market_daily_date   ON market_daily(date);
 CREATE INDEX IF NOT EXISTS idx_market_daily_name   ON market_daily(name);
 CREATE INDEX IF NOT EXISTS idx_market_daily_market ON market_daily(session, category, market, date);
@@ -145,3 +143,4 @@ CREATE INDEX IF NOT EXISTS idx_eps_cache_date    ON eps_cache(fetched_date);
 CREATE INDEX IF NOT EXISTS idx_stocks_daily_date ON stocks_daily(date, session);
 CREATE INDEX IF NOT EXISTS idx_earnings_cal_date   ON earnings_calendar(event_date);
 CREATE INDEX IF NOT EXISTS idx_earnings_cal_symbol ON earnings_calendar(symbol);
+CREATE INDEX IF NOT EXISTS idx_spx_constituents_date ON spx_constituents(fetched_date);
