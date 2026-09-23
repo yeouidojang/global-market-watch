@@ -15,6 +15,7 @@ S&P 500 거래대금 급증 + 가격 모멘텀 + EPS 상향 스크리닝
 """
 
 import io
+import os
 import sys
 import sqlite3
 import urllib.request
@@ -23,9 +24,11 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+from dotenv import load_dotenv
 
-BASE_DIR = Path("/home/quant/global-market-watch")
-OUT_DIR  = Path("/home/quant/us-market-analysis/output")
+BASE_DIR = Path(__file__).resolve().parent.parent   # global-market-watch/
+load_dotenv(BASE_DIR / ".env")
+OUT_DIR  = (BASE_DIR / (os.getenv("US_ANALYSIS_DIR") or "../us-market-analysis")).resolve() / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(BASE_DIR))
 
@@ -81,7 +84,7 @@ def fetch_sp500_meta() -> dict[str, dict]:
 
 
 # ── 2. OHLCV 로드 ─────────────────────────────────────────────────────────────
-def load_ohlcv(tickers: list[str], n_days: int = LOAD_DAYS) -> pd.DataFrame:
+def load_ohlcv(tickers: list[str], n_days: int = LOAD_DAYS, as_of: str | None = None) -> pd.DataFrame:
     placeholders = ",".join("?" * len(tickers))
     sql = f"""
         SELECT name AS ticker, date, close, volume
@@ -89,10 +92,12 @@ def load_ohlcv(tickers: list[str], n_days: int = LOAD_DAYS) -> pd.DataFrame:
         WHERE  session  = 'us'
           AND  category = 'stock'
           AND  name     IN ({placeholders})
+          AND  date    <= ?
         ORDER  BY name, date
     """
+    # 기준일(as_of) 이후 데이터는 제외 — 과거 기준일 재실행 시 미래 데이터 혼입 방지
     with sqlite3.connect(str(DB_PATH)) as conn:
-        df = pd.read_sql_query(sql, conn, params=tickers)
+        df = pd.read_sql_query(sql, conn, params=tickers + [as_of or "9999-12-31"])
 
     if df.empty:
         return df
@@ -106,13 +111,13 @@ def load_ohlcv(tickers: list[str], n_days: int = LOAD_DAYS) -> pd.DataFrame:
 
 
 # ── 3. EPS 추정치 로드 ────────────────────────────────────────────────────────
-def load_eps_cache() -> pd.DataFrame:
+def load_eps_cache(as_of: str | None = None) -> pd.DataFrame:
     """eps_cache는 종목당 여러 주(금요일)의 스냅샷을 보관 — 가장 최근 스냅샷만 사용."""
     with sqlite3.connect(str(DB_PATH)) as conn:
         df = pd.read_sql_query(
             "SELECT ticker, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date FROM eps_cache "
-            "WHERE fetched_date = (SELECT MAX(fetched_date) FROM eps_cache)",
-            conn,
+            "WHERE fetched_date = (SELECT MAX(fetched_date) FROM eps_cache WHERE fetched_date <= ?)",
+            conn, params=[as_of or "9999-12-31"],
         )
     print(f"[EPS] eps_cache → {len(df)}개 종목 (최신: {df['fetched_date'].max()})")
     return df
@@ -323,12 +328,12 @@ def run(date_str: str = TODAY) -> tuple[pd.DataFrame, Path]:
 
     print("\n▶ OHLCV 로드 (DB)")
     tickers = list(meta.keys())
-    ohlcv   = load_ohlcv(tickers)
+    ohlcv   = load_ohlcv(tickers, as_of=date_str)
     if ohlcv.empty:
         raise RuntimeError("DB에 US stock 데이터 없음")
 
     print("\n▶ EPS 추정치 로드 (eps_cache)")
-    eps = load_eps_cache()
+    eps = load_eps_cache(as_of=date_str)
 
     print("\n▶ 지표 계산")
     metrics = calc_metrics(ohlcv)

@@ -29,7 +29,7 @@ sys.path.insert(0, str(BASE_DIR))
 from db.db_manager import DBManager
 
 # S&P500 구성종목 CSV — 환경변수 SPX_CSV_PATH 또는 data/ 하위 기본 경로
-SPX_CSV_PATH = Path(os.getenv("SPX_CSV_PATH", str(BASE_DIR / "data" / "spx_constituents.csv")))
+SPX_CSV_PATH = BASE_DIR / (os.getenv("SPX_CSV_PATH") or "data/spx_constituents.csv")
 
 # RIC suffix 제거 + 특수 케이스 매핑
 _RIC_SPECIALS = {
@@ -57,7 +57,7 @@ def _fetch_spx_tickers_lseg() -> list[str]:
         except Exception:
             state = "Closed"
         if state != "Opened":
-            cfg_path = os.getenv("LSEG_CONFIG_PATH", str(Path.home() / "lseg-data.config.json"))
+            cfg_path = str(BASE_DIR / (os.getenv("LSEG_CONFIG_PATH") or str(Path.home() / "lseg-data.config.json")))
             ld.open_session(config_name=cfg_path)
             session_opened = True
 

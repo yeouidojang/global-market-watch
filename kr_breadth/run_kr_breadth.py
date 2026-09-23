@@ -17,6 +17,7 @@ import sys
 import time
 import traceback
 from datetime import datetime
+import os
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -25,7 +26,8 @@ GMW_DIR    = SCRIPT_DIR.parent
 # .env 에서 LSEG / Slack 자격증명 로드 (collect_macro.py 와 동일 패턴)
 from dotenv import load_dotenv
 load_dotenv(GMW_DIR / ".env")
-BASE_DIR   = Path("/home/quant/kr-market-analysis")
+# output/logs 경로: 기본은 서버 경로, 로컬 PC에서는 .env의 KR_ANALYSIS_DIR로 재지정
+BASE_DIR   = (GMW_DIR / (os.getenv("KR_ANALYSIS_DIR") or "../kr-market-analysis")).resolve()
 LOG_DIR    = BASE_DIR / "logs"
 OUT_DIR    = BASE_DIR / "output"
 LOG_DIR.mkdir(parents=True, exist_ok=True)

@@ -71,8 +71,8 @@ def _run_us_breadth():
     import subprocess
     from pathlib import Path
 
-    script = Path("/home/quant/global-market-watch/us_breadth/run_breadth.py")
-    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+    script = BASE_DIR / "us_breadth/run_breadth.py"
+    python = Path(sys.executable)
 
     log.info("▶ US Breadth 분석 시작")
     try:
@@ -99,8 +99,8 @@ def _run_kr_breadth():
     import subprocess
     from pathlib import Path
 
-    script = Path("/home/quant/global-market-watch/kr_breadth/run_kr_breadth.py")
-    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+    script = BASE_DIR / "kr_breadth/run_kr_breadth.py"
+    python = Path(sys.executable)
 
     log.info("▶ KR Breadth 분석 시작")
     try:
@@ -127,8 +127,8 @@ def _run_investment_points():
     """
     import subprocess
 
-    script = Path("/home/quant/global-market-watch/us_breadth/run_investment_points.py")
-    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+    script = BASE_DIR / "us_breadth/run_investment_points.py"
+    python = Path(sys.executable)
 
     log.info("▶ S&P500 투자포인트 조사 시작")
     try:
@@ -154,8 +154,8 @@ def _run_sp500_screen():
     """
     import subprocess
 
-    script = Path("/home/quant/global-market-watch/us_breadth/run_sp500_screen.py")
-    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+    script = BASE_DIR / "us_breadth/run_sp500_screen.py"
+    python = Path(sys.executable)
 
     log.info("▶ S&P500 스크리닝 시작")
     try:

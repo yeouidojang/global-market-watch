@@ -16,6 +16,7 @@
 """
 
 import io
+import os
 import sys
 import warnings
 import urllib.request
@@ -23,10 +24,12 @@ from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
+from dotenv import load_dotenv
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
-BASE_DIR = Path("/home/quant/global-market-watch")
-OUT_DIR  = Path("/home/quant/us-market-analysis/output")
+BASE_DIR = Path(__file__).resolve().parent.parent   # global-market-watch/
+load_dotenv(BASE_DIR / ".env")
+OUT_DIR  = (BASE_DIR / (os.getenv("US_ANALYSIS_DIR") or "../us-market-analysis")).resolve() / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(BASE_DIR))
 
@@ -86,7 +89,7 @@ def fetch_extra_sectors_yf(tickers: list[str]) -> tuple[dict[str, tuple[str, str
 
 # ── 2. NASDAQ-100 티커 목록 ───────────────────────────────────────────────────
 def fetch_ndx100_tickers() -> list[str]:
-    html = _wiki_html("https://en.wikipedia.org/wiki/Nasdaq-100")
+    html = _wiki_html("https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies")
     try:
         df = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})[0]
     except Exception:
@@ -110,10 +113,12 @@ def load_from_db(tickers: list[str], n_days: int = N_DAYS) -> pd.DataFrame:
         WHERE  session  = 'us'
           AND  category = 'stock'
           AND  name     IN ({placeholders})
+          AND  date    <= ?
         ORDER  BY name, date
     """
+    # 기준일(TODAY) 이후 데이터 제외 — 과거 기준일 재실행 시 미래 데이터 혼입 방지
     conn = sqlite3.connect(str(DB_PATH))
-    df   = pd.read_sql_query(query, conn, params=tickers)
+    df   = pd.read_sql_query(query, conn, params=tickers + [TODAY])
     conn.close()
 
     if df.empty:
@@ -153,7 +158,8 @@ def download_from_yfinance(tickers: list[str], n_days: int = N_DAYS) -> pd.DataF
         single = len(batch) == 1
         for t in batch:
             try:
-                sub = (raw if single else raw[t]).dropna(subset=["Close"]).tail(n_days)
+                sub = (raw if single else raw[t]).dropna(subset=["Close"])
+                sub = sub[sub.index <= pd.Timestamp(TODAY)].tail(n_days)
                 if sub.empty:
                     continue
                 for dt, row in sub.iterrows():

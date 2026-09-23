@@ -1643,7 +1643,7 @@ def fetch_europe_stocks(target_date: str) -> dict:
 #  시총 필터: min_mktcap_b ($B) 이상 종목만 (소형주 제외)
 # ================================================================== #
 
-SPX_CSV_PATH = Path(os.environ.get("SPX_CSV_PATH", BASE_DIR / "data" / "spx_constituents_prices.csv"))
+SPX_CSV_PATH = BASE_DIR / (os.environ.get("SPX_CSV_PATH") or "data/spx_constituents_prices.csv")
 
 # LSEG RIC suffix 제거 + 특수 케이스 처리
 _RIC_SPECIALS = {
@@ -1841,7 +1841,7 @@ def _lseg_screener(rics_yf: list[str], fetch_eps: bool = True,
             state = "Closed"
 
         if state != "Opened":
-            cfg_path = os.getenv("LSEG_CONFIG_PATH", str(Path.home() / "lseg-data.config.json"))
+            cfg_path = str(BASE_DIR / (os.getenv("LSEG_CONFIG_PATH") or str(Path.home() / "lseg-data.config.json")))
             ld.open_session(config_name=cfg_path)
             session_opened = True
 

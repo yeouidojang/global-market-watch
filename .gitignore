@@ -32,3 +32,6 @@ lseg-data.config.json
 .idea/
 *.DS_Store
 Thumbs.db
+
+# 로컬 분석 산출물 (US_ANALYSIS_DIR / KR_ANALYSIS_DIR)
+output/

@@ -25,11 +25,11 @@ from dotenv import load_dotenv
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-BASE_DIR = Path("/home/quant/global-market-watch")
+BASE_DIR = Path(__file__).resolve().parent.parent   # global-market-watch/
 load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
-OUT_DIR = Path("/home/quant/us-market-analysis/output")
+OUT_DIR = (BASE_DIR / (os.getenv("US_ANALYSIS_DIR") or "../us-market-analysis")).resolve() / "output"
 TODAY   = datetime.today().strftime("%Y-%m-%d")
 
 RESEARCH_MODEL  = "claude-haiku-4-5-20251001"

@@ -16,12 +16,16 @@ import logging
 import sys
 import time
 import traceback
+import os
 from datetime import datetime
 from pathlib import Path
+from dotenv import load_dotenv
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 GMW_DIR    = SCRIPT_DIR.parent
-BASE_DIR   = Path("/home/quant/us-market-analysis")  # output/logs 경로 유지
+load_dotenv(GMW_DIR / ".env")
+# output/logs 경로: 기본은 서버 경로, 로컬 PC에서는 .env의 US_ANALYSIS_DIR로 재지정
+BASE_DIR   = (GMW_DIR / (os.getenv("US_ANALYSIS_DIR") or "../us-market-analysis")).resolve()
 LOG_DIR    = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 

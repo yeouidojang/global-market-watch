@@ -16,13 +16,17 @@ import logging
 import sys
 import time
 import traceback
+import os
 from datetime import datetime
 from pathlib import Path
+from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent   # global-market-watch/
-LOG_DIR  = Path("/home/quant/us-market-analysis/logs")
+load_dotenv(BASE_DIR / ".env")
+_ANALYSIS_DIR = (BASE_DIR / (os.getenv("US_ANALYSIS_DIR") or "../us-market-analysis")).resolve()
+LOG_DIR  = _ANALYSIS_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-OUT_DIR  = Path("/home/quant/us-market-analysis/output")
+OUT_DIR  = _ANALYSIS_DIR / "output"
 
 TODAY = datetime.today().strftime("%Y-%m-%d")
 

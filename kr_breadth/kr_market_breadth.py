@@ -68,8 +68,10 @@ from datetime import datetime
 
 import pandas as pd
 
-BASE_DIR = Path("/home/quant/global-market-watch")
-OUT_DIR  = Path("/home/quant/kr-market-analysis/output")
+BASE_DIR = Path(__file__).resolve().parent.parent   # global-market-watch/
+from dotenv import load_dotenv
+load_dotenv(BASE_DIR / ".env")
+OUT_DIR  = (BASE_DIR / (os.getenv("KR_ANALYSIS_DIR") or "../kr-market-analysis")).resolve() / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(BASE_DIR))
 
