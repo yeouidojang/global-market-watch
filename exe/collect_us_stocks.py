@@ -173,6 +173,20 @@ def fetch_ohlcv(tickers: list[str], start: str, end: str) -> list[dict]:
     return records
 
 
+COVERAGE_MIN = 0.95   # 개장일에 이 비율 미만 종목만 들어오면 미확정으로 본다
+
+
+def _nyse_sessions(start_date: str, end_date: str) -> list[str]:
+    """start~end 사이 NYSE 개장일. 달력 조회 실패 시 평일로 대신한다."""
+    try:
+        import exchange_calendars as ec
+        days = ec.get_calendar("XNYS").sessions_in_range(start_date, end_date)
+    except Exception as e:
+        print(f"    [XNYS 달력 조회 실패 → 평일 기준] {e}")
+        days = pd.bdate_range(start_date, end_date)
+    return [d.strftime("%Y-%m-%d") for d in days]
+
+
 def run(start_date: str, end_date: str):
     """start_date ~ end_date 범위 OHLCV 수집 후 DB 저장."""
     tickers = load_spx_tickers()
@@ -183,17 +197,33 @@ def run(start_date: str, end_date: str):
     # yfinance end는 exclusive → 하루 뒤 날짜 전달
     yf_end = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
     records = fetch_ohlcv(tickers, start=start_date, end=yf_end)
-    if not records:
-        print("  → 수집된 데이터 없음")
-        return
 
     # 날짜 범위 필터 (yfinance가 end 직전까지 반환하므로 명시적 필터)
     records = [r for r in records if start_date <= r["date"] <= end_date]
 
-    db = DBManager()
-    saved = db.upsert_market_daily(records)
-    dates = sorted({r["date"] for r in records})
-    print(f"  → {len(records)}건 저장 (날짜 {len(dates)}일, upsert {saved}건)")
+    # 커버리지 검사 — yfinance는 마감 후 수 시간 동안 최신 봉을 일부 종목만 준다
+    # (2026-09-29 09:31 KST 실측: 9/28 봉이 503개 중 1개). 부분 날짜를 저장하면
+    # 분석이 종목마다 다른 기준일로 섞이므로 저장하지 않고 실패로 알린다.
+    counts = pd.Series([r["date"] for r in records], dtype=object).value_counts()
+    need   = int(len(tickers) * COVERAGE_MIN)
+    incomplete = [d for d in _nyse_sessions(start_date, end_date) if counts.get(d, 0) < need]
+    if incomplete:
+        records = [r for r in records if r["date"] not in incomplete]
+
+    if records:
+        db = DBManager()
+        saved = db.upsert_market_daily(records)
+        dates = sorted({r["date"] for r in records})
+        print(f"  → {len(records)}건 저장 (날짜 {len(dates)}일, upsert {saved}건)")
+    else:
+        print("  → 저장할 데이터 없음")
+
+    if incomplete:
+        detail = ", ".join(f"{d}({counts.get(d, 0)}/{len(tickers)})" for d in incomplete)
+        raise RuntimeError(
+            f"US 종목 데이터 미확정 — 커버리지 {COVERAGE_MIN:.0%} 미만 날짜 저장 안 함: {detail}. "
+            "yfinance 확정 후 재실행 필요"
+        )
 
 
 def _parse_args():

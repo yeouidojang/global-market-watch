@@ -67,8 +67,11 @@ CREATE TABLE IF NOT EXISTS stocks_daily (
     mktcap_b     REAL,                   -- 시가총액 USD B (us/europe)
     turnover     REAL,                   -- 거래량회전율 (asia featured)
     surge_ratio  REAL,                   -- 거래대금 급증 배수 (us)
+    avg_dvol_b   REAL,                   -- 직전 N일 평균 거래대금 USD B (us)
+    tv_chg_pct   REAL,                   -- 거래대금 변화율 (%) (us)
     eps_chg_1m   REAL,                   -- 30일 EPS 추정치 변화율 (%) ← 핵심
     eps_chg_1w   REAL,                   -- 7일 EPS 추정치 변화율 (%)  ← 서브
+    eps_chg_3m   REAL,                   -- 90일(12주) EPS 추정치 변화율 (%)
     return_7d    REAL,                   -- 7일 누적 수익률 (us eps_revision)
     ret_1w       REAL,                   -- 5거래일 수익률 (asia/us/europe 종목)
     ret_1m       REAL,                   -- ~22거래일 수익률 (asia/us/europe 종목)

@@ -166,7 +166,9 @@ class DBManager:
             if cols and "eps_chg_3m" not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN eps_chg_3m REAL")
                 conn.commit()
-        for col in ("foreign_net", "inst_net"):
+        # avg_dvol_b, tv_chg_pct는 upsert_stocks_daily의 INSERT에 들어 있는데 마이그레이션이
+        # 빠져 있어, 새로 만든 DB에서 "no column named avg_dvol_b"로 US 종목 저장이 실패했다.
+        for col in ("foreign_net", "inst_net", "avg_dvol_b", "tv_chg_pct"):
             cols = [r[1] for r in conn.execute("PRAGMA table_info(stocks_daily)").fetchall()]
             if cols and col not in cols:
                 conn.execute(f"ALTER TABLE stocks_daily ADD COLUMN {col} REAL")
@@ -221,6 +223,16 @@ class DBManager:
              for k, v in {**{"market": None}, **r}.items()}
             for r in records
         ]
+        # US: yfinance는 마감 후 수 시간 동안 당일 봉을 "OHLC NaN + Volume만" 으로 준다.
+        # 그대로 쓰면 close NULL 행이 기존 정상 값을 덮고 breadth/스크리닝이 전부 NaN이 된다.
+        # (2026-09-22 봉이 이렇게 들어가 9/28 산출물이 깨졌다.)
+        dropped = [r for r in records if r.get("session") == "us" and r.get("close") is None]
+        if dropped:
+            records = [r for r in records if not (r.get("session") == "us" and r.get("close") is None)]
+            dates = sorted({r["date"] for r in dropped})
+            print(f"    [market_daily] US close 없는 행 {len(dropped)}건 제외 (날짜: {', '.join(dates)})")
+            if not records:
+                return 0
         sql = """
             INSERT INTO market_daily (date, session, category, name, market, close, open, high, low, volume)
             VALUES (:date, :session, :category, :name, :market, :close, :open, :high, :low, :volume)
@@ -866,6 +878,27 @@ class DBManager:
                     "eps_chg_3m":   r["eps_chg_3m"],
                     "fetched_date": r["fetched_date"],
                 } for r in rows}
+
+    def update_eps_changes(self, fetched_date: str, changes: dict[str, dict]) -> int:
+        """스냅샷의 파생 변화율(1W/1M/3M)만 갱신한다. 원본값·created_at은 건드리지 않는다."""
+        if not changes:
+            return 0
+        rows = [
+            {"ticker": t, "fetched_date": fetched_date,
+             "eps_chg_1w": c.get("eps_chg_1w"), "eps_chg_1m": c.get("eps_chg_1m"),
+             "eps_chg_3m": c.get("eps_chg_3m")}
+            for t, c in changes.items()
+        ]
+        conn = self._connect()
+        cursor = conn.executemany(
+            "UPDATE eps_cache SET eps_chg_1w = :eps_chg_1w, eps_chg_1m = :eps_chg_1m, "
+            "eps_chg_3m = :eps_chg_3m WHERE ticker = :ticker AND fetched_date = :fetched_date",
+            rows,
+        )
+        conn.commit()
+        count = cursor.rowcount
+        conn.close()
+        return count
 
     def get_eps_estimates_at(self, fetched_date: str) -> dict:
         """특정 스냅샷 날짜의 {ticker: eps_mean_est} 반환 (N주 전 값 조회용)."""
