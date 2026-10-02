@@ -25,11 +25,12 @@ from dotenv import load_dotenv
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-BASE_DIR = Path("/home/quant/global-market-watch")
+BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 sys.path.insert(0, str(BASE_DIR))
 
-OUT_DIR = Path("/home/quant/us-market-analysis/output")
+# 산출물 경로는 US_ANALYSIS_DIR 로 덮어쓸 수 있고, 미설정 시 <repo>/reports/us-market-analysis.
+OUT_DIR = Path(os.getenv("US_ANALYSIS_DIR", Path(__file__).resolve().parents[1] / "reports" / "us-market-analysis")) / "output"
 TODAY   = datetime.today().strftime("%Y-%m-%d")
 
 RESEARCH_MODEL  = "claude-haiku-4-5-20251001"

@@ -18,7 +18,7 @@ GICS 섹터: LSEG TR.GICSSector / TR.GICSSubIndustry
   KOSDAQ150      — 종목별 지표
   KOSDAQ150_섹터 — GICS 섹터별 집계
 
-출력: /home/quant/kr-market-analysis/output/kr_breadth_YYYYMMDD.xlsx
+출력: <KR_ANALYSIS_DIR>/output/kr_breadth_YYYYMMDD.xlsx
 """
 
 import ssl
@@ -68,8 +68,9 @@ from datetime import datetime
 
 import pandas as pd
 
-BASE_DIR = Path("/home/quant/global-market-watch")
-OUT_DIR  = Path("/home/quant/kr-market-analysis/output")
+BASE_DIR = Path(__file__).resolve().parent.parent
+# 산출물 경로는 KR_ANALYSIS_DIR 로 덮어쓸 수 있고, 미설정 시 <repo>/reports/kr-market-analysis.
+OUT_DIR  = Path(os.getenv("KR_ANALYSIS_DIR", BASE_DIR / "reports" / "kr-market-analysis")) / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(BASE_DIR))
 

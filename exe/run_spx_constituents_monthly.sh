@@ -10,5 +10,7 @@ if [ "$FRI_DOM" -lt 15 ] || [ "$FRI_DOM" -gt 21 ]; then
     exit 0
 fi
 
-cd /home/quant/global-market-watch
-exec /home/quant/global-market-watch/.venv/bin/python exe/collect_spx_constituents.py
+cd "$(dirname "$0")/.."
+PY=.venv/bin/python
+[ -x "$PY" ] || PY=.venv/Scripts/python.exe   # Windows(Git Bash)
+exec "$PY" exe/collect_spx_constituents.py

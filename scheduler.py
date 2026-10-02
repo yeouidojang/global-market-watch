@@ -66,13 +66,13 @@ def _run_us_breadth():
     """07:00 KST — US Market Breadth 분석 (S&P500 / NASDAQ-100 구성종목 지표).
 
     global 파이프라인(06:10 KST)이 DB를 업데이트한 뒤 실행.
-    출력: /home/quant/us-market-analysis/output/us_breadth_YYYYMMDD.xlsx
+    출력: <US_ANALYSIS_DIR>/output/us_breadth_YYYYMMDD.xlsx
     """
     import subprocess
     from pathlib import Path
 
-    script = Path("/home/quant/global-market-watch/us_breadth/run_breadth.py")
-    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+    script = BASE_DIR / "us_breadth/run_breadth.py"
+    python = Path(sys.executable)
 
     log.info("▶ US Breadth 분석 시작")
     try:
@@ -94,13 +94,13 @@ def _run_kr_breadth():
     """17:00 KST — KR Market Breadth 분석 (KOSPI200 / KOSDAQ150 구성종목 지표).
 
     asia 파이프라인(16:20 KST)이 DB를 업데이트한 뒤 실행.
-    출력: /home/quant/kr-market-analysis/output/kr_breadth_YYYYMMDD.xlsx
+    출력: <KR_ANALYSIS_DIR>/output/kr_breadth_YYYYMMDD.xlsx
     """
     import subprocess
     from pathlib import Path
 
-    script = Path("/home/quant/global-market-watch/kr_breadth/run_kr_breadth.py")
-    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+    script = BASE_DIR / "kr_breadth/run_kr_breadth.py"
+    python = Path(sys.executable)
 
     log.info("▶ KR Breadth 분석 시작")
     try:
@@ -123,12 +123,12 @@ def _run_investment_points():
 
     sp500_screen(07:30 KST) 완료 후 실행.
     Claude API + web_search 로 EPS 3달 상향 종목 투자포인트 조사 → Excel → Slack.
-    출력: /home/quant/us-market-analysis/output/sp500_investment_points_YYYYMMDD.xlsx
+    출력: <US_ANALYSIS_DIR>/output/sp500_investment_points_YYYYMMDD.xlsx
     """
     import subprocess
 
-    script = Path("/home/quant/global-market-watch/us_breadth/run_investment_points.py")
-    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+    script = BASE_DIR / "us_breadth/run_investment_points.py"
+    python = Path(sys.executable)
 
     log.info("▶ S&P500 투자포인트 조사 시작")
     try:
@@ -150,12 +150,12 @@ def _run_sp500_screen():
     """07:30 KST — S&P 500 거래대금 급증 + 모멘텀 + EPS 상향 스크리닝.
 
     US Breadth 분석(07:00 KST) 완료 후 실행.
-    출력: /home/quant/us-market-analysis/output/sp500_screen_YYYYMMDD.xlsx
+    출력: <US_ANALYSIS_DIR>/output/sp500_screen_YYYYMMDD.xlsx
     """
     import subprocess
 
-    script = Path("/home/quant/global-market-watch/us_breadth/run_sp500_screen.py")
-    python = Path("/home/quant/global-market-watch/.venv/bin/python")
+    script = BASE_DIR / "us_breadth/run_sp500_screen.py"
+    python = Path(sys.executable)
 
     log.info("▶ S&P500 스크리닝 시작")
     try:

@@ -8,7 +8,8 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path("/home/quant/global-market-watch/.env"))
+# (dotenv는 기존 환경변수를 덮어쓰지 않으므로 이미 로드된 값이 있으면 그대로 유지된다.)
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 CHANNEL   = os.getenv("SLACK_BREADTH_CHANNEL", "")

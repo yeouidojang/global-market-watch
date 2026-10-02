@@ -1,8 +1,8 @@
 """
 US Market Breadth 분석 실행기
   · global-market-watch 파이프라인(06:10 KST)이 DB 업데이트 완료 후 실행
-  · 출력: /home/quant/us-market-analysis/output/us_breadth_YYYYMMDD.xlsx
-  · 로그: /home/quant/us-market-analysis/logs/breadth_YYYYMMDD.log
+  · 출력: <US_ANALYSIS_DIR>/output/us_breadth_YYYYMMDD.xlsx
+  · 로그: <US_ANALYSIS_DIR>/logs/breadth_YYYYMMDD.log
   · ops 알림: SLACK_WEBHOOK_URL_MARKET_WATCH_OPS 채널
 
 사용법:
@@ -21,7 +21,9 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 GMW_DIR    = SCRIPT_DIR.parent
-BASE_DIR   = Path("/home/quant/us-market-analysis")  # output/logs 경로 유지
+import os
+# 산출물·로그 경로. US_ANALYSIS_DIR 미설정 시 <repo>/reports/us-market-analysis.
+BASE_DIR   = Path(os.getenv("US_ANALYSIS_DIR", Path(__file__).resolve().parents[1] / "reports" / "us-market-analysis"))
 LOG_DIR    = BASE_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -16,6 +16,7 @@
 """
 
 import io
+import os
 import sys
 import warnings
 import urllib.request
@@ -25,8 +26,9 @@ from datetime import datetime
 import pandas as pd
 
 # ── 경로 ─────────────────────────────────────────────────────────────────────
-BASE_DIR = Path("/home/quant/global-market-watch")
-OUT_DIR  = Path("/home/quant/us-market-analysis/output")
+# 산출물 경로는 US_ANALYSIS_DIR 로 덮어쓸 수 있고, 미설정 시 <repo>/reports/us-market-analysis.
+BASE_DIR = Path(__file__).resolve().parent.parent
+OUT_DIR  = Path(os.getenv("US_ANALYSIS_DIR", Path(__file__).resolve().parents[1] / "reports" / "us-market-analysis")) / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(BASE_DIR))
 
@@ -86,12 +88,40 @@ def fetch_extra_sectors_yf(tickers: list[str]) -> tuple[dict[str, tuple[str, str
 
 # ── 2. NASDAQ-100 티커 목록 ───────────────────────────────────────────────────
 def fetch_ndx100_tickers() -> list[str]:
-    html = _wiki_html("https://en.wikipedia.org/wiki/Nasdaq-100")
-    try:
-        df = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})[0]
-    except Exception:
-        tables = pd.read_html(io.StringIO(html))
-        df = next(t for t in tables if "Ticker" in t.columns or "Symbol" in t.columns)
+    # 2026-09 확인: Nasdaq-100 문서에서 구성종목 표가 빠지고 별도 문서로 분리됐다.
+    # 새 문서를 먼저 보고, 원복될 경우를 대비해 기존 문서를 폴백으로 남긴다.
+    urls = [
+        "https://en.wikipedia.org/wiki/List_of_NASDAQ-100_companies",
+        "https://en.wikipedia.org/wiki/Nasdaq-100",
+    ]
+    df = None
+    for url in urls:
+        try:
+            html = _wiki_html(url)
+        except Exception:
+            continue
+        try:
+            df = pd.read_html(io.StringIO(html), attrs={"id": "constituents"})[0]
+            break
+        except Exception:
+            try:
+                tables = pd.read_html(io.StringIO(html))
+            except Exception:
+                continue
+            # 구성종목 표만 골라낸다 — 티커 컬럼이 있고 100종목 안팎인 표.
+            df = next(
+                (t for t in tables
+                 if ("Ticker" in t.columns or "Symbol" in t.columns) and len(t) >= 90),
+                None,
+            )
+            if df is not None:
+                break
+
+    if df is None:
+        raise RuntimeError(
+            "NASDAQ-100 구성종목 표를 찾지 못했다 — Wikipedia 문서 구조가 또 바뀌었는지 확인할 것: "
+            + ", ".join(urls)
+        )
 
     col     = "Ticker" if "Ticker" in df.columns else "Symbol"
     tickers = [str(t).replace(".", "-").strip() for t in df[col].tolist() if isinstance(t, str)]
@@ -119,10 +149,47 @@ def load_from_db(tickers: list[str], n_days: int = N_DAYS) -> pd.DataFrame:
     if df.empty:
         return df
 
-    df["date"] = pd.to_datetime(df["date"])
+    df         = complete_dates_only(df, len(tickers))
     all_dates  = sorted(df["date"].unique())
     cutoff     = all_dates[-n_days] if len(all_dates) >= n_days else all_dates[0]
     return df[df["date"] >= cutoff].copy()
+
+
+# ── 3-1. 데이터 검증 (sp500_volume_screen도 사용) ─────────────────────────────
+COVERAGE_MIN = 0.95   # 날짜별로 이 비율 이상 종목이 있어야 "완전한 날짜"
+MAX_LAG_BDAYS = 3     # 요청 기준일 대비 데이터 최신일이 이보다 오래되면 실패
+
+
+def complete_dates_only(df: pd.DataFrame, n_tickers: int) -> pd.DataFrame:
+    """close NULL 행을 버리고, 마지막 완전한 날짜 이후의 부분 날짜를 잘라낸다.
+
+    yfinance 미확정 봉(OHLC NaN + Volume만)이나 일부 종목만 들어온 최신일이 섞이면
+    종목마다 기준일이 달라지거나 지표가 전부 NaN이 된다 (2026-09-28 산출물 사례).
+    """
+    df = df.dropna(subset=["close"]).copy()
+    df["date"] = pd.to_datetime(df["date"])
+    counts   = df.groupby("date")["ticker"].nunique()
+    complete = counts[counts >= n_tickers * COVERAGE_MIN]
+    if complete.empty:
+        raise RuntimeError(f"완전한 날짜 없음 — 종목 {n_tickers}개 중 {COVERAGE_MIN:.0%} 이상 들어온 날이 없다")
+    last = complete.index.max()
+    partial = counts[counts.index > last]
+    if not partial.empty:
+        detail = ", ".join(f"{d:%Y-%m-%d}({n}/{n_tickers})" for d, n in partial.items())
+        print(f"  [검증] 부분 날짜 제외: {detail} → 기준 데이터일 {last:%Y-%m-%d}")
+    return df[df["date"] <= last]
+
+
+def check_freshness(data_date, req_date: str) -> None:
+    """데이터 최신일이 요청 기준일보다 MAX_LAG_BDAYS 영업일 넘게 뒤처지면 실패."""
+    data_date = pd.Timestamp(data_date)
+    lag = len(pd.bdate_range(data_date, pd.Timestamp(req_date))) - 1
+    if lag > MAX_LAG_BDAYS:
+        raise RuntimeError(
+            f"DB 데이터가 오래됨 — 최신 {data_date:%Y-%m-%d}, 요청 기준일 {req_date} "
+            f"({lag}영업일 차이). 수집(collect_us_stocks) 먼저 실행할 것"
+        )
+    print(f"  [검증] 데이터 기준일 {data_date:%Y-%m-%d} (요청 {req_date}, {lag}영업일 차이)")
 
 
 # ── 4. yfinance OHLCV 보완 ───────────────────────────────────────────────────
@@ -333,6 +400,9 @@ def run():
     print(f"  DB 티커 수: {len(sp_tickers)}")
 
     sp_df     = load_from_db(sp_tickers)
+    if sp_df.empty:
+        raise RuntimeError("DB에 US stock 데이터 없음")
+    check_freshness(sp_df["date"].max(), TODAY)
     sp_result = calc_metrics(sp_df)
     sp_result = attach_meta(sp_result, name_map, sp500_sector_map)
     sp_result = sp_result.sort_values(["섹터", "고가대비(%)"])

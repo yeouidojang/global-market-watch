@@ -2,7 +2,7 @@
 S&P500 투자포인트 자동 조사 실행기
   · sp500_screen (07:30 KST) 완료 후 실행 (08:00 KST)
   · Claude API + web_search 로 종목별 투자포인트 조사 → Excel → Slack
-  · 로그: /home/quant/us-market-analysis/logs/investment_points_YYYYMMDD.log
+  · 로그: <US_ANALYSIS_DIR>/logs/investment_points_YYYYMMDD.log
   · Ops: SLACK_WEBHOOK_URL_MARKET_WATCH_OPS
 
 사용법:
@@ -19,9 +19,13 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import os
+
 BASE_DIR = Path(__file__).resolve().parent.parent   # global-market-watch/
-LOG_DIR  = Path("/home/quant/us-market-analysis/logs")
-OUT_DIR  = Path("/home/quant/us-market-analysis/output")
+# 산출물·로그 경로. US_ANALYSIS_DIR 미설정 시 <repo>/reports/us-market-analysis.
+_ANALYSIS_DIR = Path(os.getenv("US_ANALYSIS_DIR", Path(__file__).resolve().parents[1] / "reports" / "us-market-analysis"))
+LOG_DIR  = _ANALYSIS_DIR / "logs"
+OUT_DIR  = _ANALYSIS_DIR / "output"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 TODAY = datetime.today().strftime("%Y-%m-%d")

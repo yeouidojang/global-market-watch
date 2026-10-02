@@ -1,8 +1,8 @@
 """
 KOSPI/KOSDAQ Market Breadth 분석 실행기
   · asia 파이프라인(16:10 KST) 이후 실행 권장
-  · 출력: /home/quant/kr-market-analysis/output/kr_breadth_YYYYMMDD.xlsx
-  · 로그: /home/quant/kr-market-analysis/logs/breadth_YYYYMMDD.log
+  · 출력: <KR_ANALYSIS_DIR>/output/kr_breadth_YYYYMMDD.xlsx
+  · 로그: <KR_ANALYSIS_DIR>/logs/breadth_YYYYMMDD.log
   · ops 알림: SLACK_WEBHOOK_URL_MARKET_WATCH_OPS 채널
 
 사용법:
@@ -12,6 +12,7 @@ KOSPI/KOSDAQ Market Breadth 분석 실행기
 """
 
 import argparse
+import os
 import logging
 import sys
 import time
@@ -25,7 +26,8 @@ GMW_DIR    = SCRIPT_DIR.parent
 # .env 에서 LSEG / Slack 자격증명 로드 (collect_macro.py 와 동일 패턴)
 from dotenv import load_dotenv
 load_dotenv(GMW_DIR / ".env")
-BASE_DIR   = Path("/home/quant/kr-market-analysis")
+# 산출물·로그 경로. KR_ANALYSIS_DIR 미설정 시 <repo>/reports/kr-market-analysis.
+BASE_DIR   = Path(os.getenv("KR_ANALYSIS_DIR", GMW_DIR / "reports" / "kr-market-analysis"))
 LOG_DIR    = BASE_DIR / "logs"
 OUT_DIR    = BASE_DIR / "output"
 LOG_DIR.mkdir(parents=True, exist_ok=True)

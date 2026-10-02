@@ -1,7 +1,7 @@
 """
 S&P 500 거래대금 급증 + 모멘텀 + EPS 상향 스크리닝 실행기
   · global 파이프라인(06:10 KST) + US Breadth(07:00 KST) 이후 실행 (07:30 KST)
-  · 출력: /home/quant/us-market-analysis/output/sp500_screen_YYYYMMDD.xlsx
+  · 출력: <US_ANALYSIS_DIR>/output/sp500_screen_YYYYMMDD.xlsx
   · Slack: SLACK_BREADTH_CHANNEL (파일 업로드)
   · Ops : SLACK_WEBHOOK_URL_MARKET_WATCH_OPS
 
@@ -19,10 +19,14 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+import os
+
 BASE_DIR = Path(__file__).resolve().parent.parent   # global-market-watch/
-LOG_DIR  = Path("/home/quant/us-market-analysis/logs")
+# 산출물·로그 경로. US_ANALYSIS_DIR 미설정 시 <repo>/reports/us-market-analysis.
+_ANALYSIS_DIR = Path(os.getenv("US_ANALYSIS_DIR", Path(__file__).resolve().parents[1] / "reports" / "us-market-analysis"))
+LOG_DIR  = _ANALYSIS_DIR / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
-OUT_DIR  = Path("/home/quant/us-market-analysis/output")
+OUT_DIR  = _ANALYSIS_DIR / "output"
 
 TODAY = datetime.today().strftime("%Y-%m-%d")
 
@@ -101,8 +105,11 @@ def run(date_str: str, force: bool = False):
 
         log.info(f"\n✅ 완료 ({elapsed}s) — 통과 종목: {len(screened)}개")
 
-        # Slack 파일 업로드
-        _upload_slack(file_path, len(screened), date_str)
+        # Slack 파일 업로드 — 실패해도 산출물은 저장됐으므로 경고로만 남긴다 (run_breadth와 동일)
+        try:
+            _upload_slack(file_path, len(screened), date_str)
+        except Exception as se:
+            log.warning(f"[Slack] 발송 실패 (분석 결과는 저장됨): {se}")
 
         # Ops 성공 알림
         _send_ops(

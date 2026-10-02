@@ -15,6 +15,7 @@ S&P 500 거래대금 급증 + 가격 모멘텀 + EPS 상향 스크리닝
 """
 
 import io
+import os
 import sys
 import sqlite3
 import urllib.request
@@ -24,10 +25,14 @@ from pathlib import Path
 
 import pandas as pd
 
-BASE_DIR = Path("/home/quant/global-market-watch")
-OUT_DIR  = Path("/home/quant/us-market-analysis/output")
+# 산출물 경로는 US_ANALYSIS_DIR 로 덮어쓸 수 있고, 미설정 시 <repo>/reports/us-market-analysis.
+BASE_DIR = Path(__file__).resolve().parent.parent
+OUT_DIR  = Path(os.getenv("US_ANALYSIS_DIR", Path(__file__).resolve().parents[1] / "reports" / "us-market-analysis")) / "output"
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(BASE_DIR))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from us_market_breadth import complete_dates_only, check_freshness
 
 DB_PATH  = BASE_DIR / "db" / "market_watch.db"
 TODAY    = datetime.today().strftime("%Y-%m-%d")
@@ -38,6 +43,7 @@ PRIOR_DAYS    = 20   # 직전 M 거래일 (4주)
 MIN_PRICE     = 5.0  # 최소 주가 ($) — 페니스톡 제외
 MIN_DOLLARVOL = 5e6  # 최소 일평균 거래대금 ($) — 비유동 종목 제외
 LOAD_DAYS     = RECENT_DAYS + PRIOR_DAYS + 5  # 여유분 포함 로드
+STREAK_MAX    = 63   # 연속편입일수 역산 상한 (약 3개월). 상한에 닿으면 "63 이상"으로 본다
 
 
 # ── 1. 종목 메타데이터 ────────────────────────────────────────────────────────
@@ -81,7 +87,8 @@ def fetch_sp500_meta() -> dict[str, dict]:
 
 
 # ── 2. OHLCV 로드 ─────────────────────────────────────────────────────────────
-def load_ohlcv(tickers: list[str], n_days: int = LOAD_DAYS) -> pd.DataFrame:
+def load_ohlcv(tickers: list[str], end_date: str, n_days: int = LOAD_DAYS) -> pd.DataFrame:
+    """end_date(기준일) 이하 데이터만 — 과거 기준일로 돌려도 이후 데이터가 섞이지 않는다."""
     placeholders = ",".join("?" * len(tickers))
     sql = f"""
         SELECT name AS ticker, date, close, volume
@@ -89,15 +96,16 @@ def load_ohlcv(tickers: list[str], n_days: int = LOAD_DAYS) -> pd.DataFrame:
         WHERE  session  = 'us'
           AND  category = 'stock'
           AND  name     IN ({placeholders})
+          AND  date     <= ?
         ORDER  BY name, date
     """
     with sqlite3.connect(str(DB_PATH)) as conn:
-        df = pd.read_sql_query(sql, conn, params=tickers)
+        df = pd.read_sql_query(sql, conn, params=tickers + [end_date])
 
     if df.empty:
         return df
 
-    df["date"] = pd.to_datetime(df["date"])
+    df         = complete_dates_only(df, len(tickers))
     all_dates  = sorted(df["date"].unique())
     cutoff     = all_dates[-n_days] if len(all_dates) >= n_days else all_dates[0]
     df = df[df["date"] >= cutoff].copy()
@@ -106,15 +114,27 @@ def load_ohlcv(tickers: list[str], n_days: int = LOAD_DAYS) -> pd.DataFrame:
 
 
 # ── 3. EPS 추정치 로드 ────────────────────────────────────────────────────────
-def load_eps_cache() -> pd.DataFrame:
-    """eps_cache는 종목당 여러 주(금요일)의 스냅샷을 보관 — 가장 최근 스냅샷만 사용."""
+def load_eps_history(end_date: str) -> pd.DataFrame:
+    """end_date 이하 eps_cache 스냅샷 전체 (금요일별). 날짜별 선택은 eps_as_of로."""
     with sqlite3.connect(str(DB_PATH)) as conn:
-        df = pd.read_sql_query(
+        return pd.read_sql_query(
             "SELECT ticker, eps_chg_1w, eps_chg_1m, eps_chg_3m, fetched_date FROM eps_cache "
-            "WHERE fetched_date = (SELECT MAX(fetched_date) FROM eps_cache)",
-            conn,
+            "WHERE fetched_date <= ?",
+            conn, params=[end_date],
         )
-    print(f"[EPS] eps_cache → {len(df)}개 종목 (최신: {df['fetched_date'].max()})")
+
+
+def eps_as_of(eps_hist: pd.DataFrame, date_str: str) -> pd.DataFrame:
+    """date_str 이하 가장 최근 스냅샷 한 장."""
+    avail = eps_hist.loc[eps_hist["fetched_date"] <= date_str, "fetched_date"]
+    if avail.empty:
+        return eps_hist.iloc[0:0]
+    return eps_hist[eps_hist["fetched_date"] == avail.max()]
+
+
+def load_eps_cache(date_str: str) -> pd.DataFrame:
+    df = eps_as_of(load_eps_history(date_str), date_str)
+    print(f"[EPS] eps_cache → {len(df)}개 종목 (기준일 이하 최신: {df['fetched_date'].max()})")
     return df
 
 
@@ -204,7 +224,7 @@ def load_ytd_returns(tickers: list[str], cur_price: dict[str, float], date_str: 
 
 
 # ── 5. 필터 + 스코어링 ────────────────────────────────────────────────────────
-def apply_filters(metrics: pd.DataFrame, eps: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def apply_filters(metrics: pd.DataFrame, eps: pd.DataFrame, verbose: bool = True) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Returns
     -------
@@ -251,8 +271,51 @@ def apply_filters(metrics: pd.DataFrame, eps: pd.DataFrame) -> tuple[pd.DataFram
         screened = screened.sort_values("종합점수", ascending=False).reset_index(drop=True)
 
     candidates = candidates.sort_values("거래대금_비율", ascending=False).reset_index(drop=True)
-    print(f"[필터] 거래대금 급증: {len(candidates)}개 → 가격+EPS 필터 후: {len(screened)}개")
+    if verbose:
+        print(f"[필터] 거래대금 급증: {len(candidates)}개 → 가격+EPS 필터 후: {len(screened)}개")
     return screened, candidates
+
+
+# ── 5-1. 연속편입일수 ─────────────────────────────────────────────────────────
+def _window(ohlcv_all: pd.DataFrame, date) -> pd.DataFrame:
+    """date 이하 최근 LOAD_DAYS 거래일 — 그 날 실행했을 때 보였을 데이터와 같은 창."""
+    dates = sorted(d for d in ohlcv_all["date"].unique() if d <= pd.Timestamp(date))
+    return ohlcv_all[ohlcv_all["date"].isin(dates[-LOAD_DAYS:])]
+
+
+def screened_at(ohlcv_all: pd.DataFrame, eps_hist: pd.DataFrame, date) -> set[str]:
+    """date 기준 필터링종목 티커 집합 (콘솔 출력 없이)."""
+    d = pd.Timestamp(date)
+    metrics = calc_metrics(_window(ohlcv_all, d))
+    if metrics.empty:
+        return set()
+    screened, _ = apply_filters(metrics, eps_as_of(eps_hist, d.strftime("%Y-%m-%d")), verbose=False)
+    return set(screened["ticker"])
+
+
+def calc_streaks(ohlcv_all: pd.DataFrame, eps_hist: pd.DataFrame, date_str: str,
+                 today: set[str], cache: dict | None = None) -> dict[str, int]:
+    """기준일 포함, 필터링종목에 연속으로 들어 있는 거래일 수.
+
+    전일, 전전일 … 순서로 그날 기준 스크리닝을 다시 계산해 끊기는 날까지 센다
+    (과거 산출물 파일에 의존하지 않는다). STREAK_MAX에서 멈춘다.
+    cache: {Timestamp: set} — 여러 날짜를 연달아 돌릴 때 재계산을 줄인다.
+    """
+    cache = {} if cache is None else cache
+    dates = sorted(d for d in ohlcv_all["date"].unique() if d <= pd.Timestamp(date_str))
+    streak = {t: 1 for t in today}
+    active = set(today)
+    for back in range(1, STREAK_MAX):
+        i = len(dates) - 1 - back
+        if not active or i < RECENT_DAYS + PRIOR_DAYS:   # 그 날 지표를 계산할 이력이 모자라면 중단
+            break
+        d = dates[i]
+        if d not in cache:
+            cache[d] = screened_at(ohlcv_all, eps_hist, d)
+        active &= cache[d]
+        for t in active:
+            streak[t] += 1
+    return streak
 
 
 # ── 6. 메타데이터 부착 ───────────────────────────────────────────────────────
@@ -296,6 +359,7 @@ def save_excel(
         {"항목": "EPS 조건",             "값": "1달 EPS 변화율 > 0"},
         {"항목": "거래대금 급증 후보",   "값": len(candidates)},
         {"항목": "최종 통과 종목",       "값": len(screened)},
+        {"항목": "연속편입일수",         "값": f"기준일 포함, 필터링종목에 연속으로 든 거래일 수 (상한 {STREAK_MAX} = 그 이상)"},
     ])
 
     with pd.ExcelWriter(str(path), engine="openpyxl") as writer:
@@ -310,56 +374,84 @@ def save_excel(
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
-def run(date_str: str = TODAY) -> tuple[pd.DataFrame, Path]:
+def run(date_str: str = TODAY, meta: dict | None = None,
+        ohlcv_all: pd.DataFrame | None = None, eps_hist: pd.DataFrame | None = None,
+        streak_cache: dict | None = None, quiet: bool = False) -> tuple[pd.DataFrame, Path]:
+    """date_str 기준 스크리닝 → Excel.
+
+    meta/ohlcv_all/eps_hist/streak_cache 는 여러 날짜를 연달아 돌릴 때(run_sp500_screen_history)
+    한 번 읽은 것을 재사용하려는 용도. 없으면 여기서 읽는다. 어느 경우든 date_str 이후 데이터는 쓰지 않는다.
+    """
     global TODAY
     TODAY = date_str
-    print(f"\n{'='*60}")
-    print(f"  S&P 500 거래대금 급증 + 모멘텀 + EPS 상향 스크리닝")
-    print(f"  기준일: {date_str}")
-    print(f"{'='*60}\n")
+    log = (lambda *a, **k: None) if quiet else print
+    log(f"\n{'='*60}")
+    log(f"  S&P 500 거래대금 급증 + 모멘텀 + EPS 상향 스크리닝")
+    log(f"  기준일: {date_str}")
+    log(f"{'='*60}\n")
 
-    print("▶ 종목 메타데이터 로드 (Wikipedia)")
-    meta = fetch_sp500_meta()
-
-    print("\n▶ OHLCV 로드 (DB)")
+    if meta is None:
+        log("▶ 종목 메타데이터 로드 (Wikipedia)")
+        meta = fetch_sp500_meta()
     tickers = list(meta.keys())
-    ohlcv   = load_ohlcv(tickers)
-    if ohlcv.empty:
+
+    if ohlcv_all is None:
+        log("\n▶ OHLCV 로드 (DB)")
+        ohlcv_all = load_ohlcv(tickers, date_str, n_days=LOAD_DAYS + STREAK_MAX)
+    if ohlcv_all.empty:
         raise RuntimeError("DB에 US stock 데이터 없음")
+    ohlcv = _window(ohlcv_all, date_str)
+    if ohlcv.empty:
+        raise RuntimeError(f"{date_str} 이하 US stock 데이터 없음")
+    check_freshness(ohlcv["date"].max(), date_str)
 
-    print("\n▶ EPS 추정치 로드 (eps_cache)")
-    eps = load_eps_cache()
+    if eps_hist is None:
+        log("\n▶ EPS 추정치 로드 (eps_cache)")
+        eps_hist = load_eps_history(date_str)
+    eps = eps_as_of(eps_hist, date_str)
+    log(f"[EPS] 기준일 이하 최신 스냅샷 {eps['fetched_date'].max()} ({len(eps)}개 종목)")
 
-    print("\n▶ 지표 계산")
+    log("\n▶ 지표 계산")
     metrics = calc_metrics(ohlcv)
-    print(f"  유효 종목: {len(metrics)}개")
+    log(f"  유효 종목: {len(metrics)}개")
 
-    print("\n▶ YTD 수익률 계산")
+    log("\n▶ YTD 수익률 계산")
     cur_price_map = dict(zip(metrics["ticker"], metrics["현재가($)"]))
     ytd_map = load_ytd_returns(list(cur_price_map.keys()), cur_price_map, date_str)
     metrics["YTD_수익률(%)"] = metrics["ticker"].map(ytd_map)
-    print(f"  YTD 계산 완료: {len(ytd_map)}개")
+    log(f"  YTD 계산 완료: {len(ytd_map)}개")
 
-    print("\n▶ 필터 적용")
-    screened, candidates = apply_filters(metrics, eps)
+    log("\n▶ 필터 적용")
+    screened, candidates = apply_filters(metrics, eps, verbose=not quiet)
 
-    print("\n▶ 메타데이터 부착")
+    log("\n▶ 연속편입일수 계산")
+    streaks = calc_streaks(ohlcv_all, eps_hist, date_str, set(screened["ticker"]), streak_cache)
+
+    log("\n▶ 메타데이터 부착")
     screened   = attach_meta(screened,   meta)
     candidates = attach_meta(candidates, meta)
+    if not screened.empty:
+        screened.insert(4, "연속편입일수", screened["ticker"].map(streaks).astype(int))
 
-    print("\n▶ Excel 저장")
-    path = save_excel(screened, candidates, date_str)
+    log("\n▶ Excel 저장")
+    path = save_excel(screened, candidates, date_str) if not quiet else _save_quiet(screened, candidates, date_str)
 
     # 콘솔 요약
-    print(f"\n{'='*60}")
-    print(f"■ 최종 통과 종목 (상위 20개)")
+    log(f"\n{'='*60}")
+    log(f"■ 최종 통과 종목 (상위 20개)")
     if screened.empty:
-        print("  — 해당 없음")
+        log("  — 해당 없음")
     else:
-        cols = ["ticker", "종목명", "섹터", "거래대금_비율",
+        cols = ["ticker", "종목명", "섹터", "연속편입일수", "거래대금_비율",
                 "1주_수익률(%)", "1개월_수익률(%)", "YTD_수익률(%)",
                 "MA20_이격도(%)", "EPS_1달변화율(%)", "종합점수"]
         avail = [c for c in cols if c in screened.columns]
-        print(screened[avail].head(20).to_string(index=False))
+        log(screened[avail].head(20).to_string(index=False))
 
     return screened, path
+
+
+def _save_quiet(screened, candidates, date_str) -> Path:
+    import contextlib
+    with contextlib.redirect_stdout(io.StringIO()):
+        return save_excel(screened, candidates, date_str)
