@@ -7,9 +7,15 @@ __pycache__/
 .venv/
 venv/
 
+# 로컬(Windows) weasyprint용 GTK 런타임 — conda로 받은 것, 배포 대상 아님
+.gtk/
+
 # 로그
 *.log
 logs/
+
+# 사람이 보는 산출물 (xlsx/pdf/png) — 로컬 실행 결과, git으로 공유 안 함
+reports/
 
 # DB — 로컬·서버 각자 보존, git으로 공유 안 함
 db/*.db
