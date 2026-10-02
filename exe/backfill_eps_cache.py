@@ -46,7 +46,7 @@ def run(weeks: int = 12, dates: list[str] | None = None):
     print(f"[backfill_eps] 대상 티커 {len(tickers)}개 | 대상일 {len(target_dates)}개: {target_dates}")
 
     import lseg.data as ld
-    cfg_path = os.getenv("LSEG_CONFIG_PATH", str(Path.home() / "lseg-data.config.json"))
+    cfg_path = str(BASE_DIR / (os.getenv("LSEG_CONFIG_PATH") or str(Path.home() / "lseg-data.config.json")))
     ld.open_session(config_name=cfg_path)
     try:
         for d in target_dates:

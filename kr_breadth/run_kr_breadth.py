@@ -12,12 +12,12 @@ KOSPI/KOSDAQ Market Breadth 분석 실행기
 """
 
 import argparse
-import os
 import logging
 import sys
 import time
 import traceback
 from datetime import datetime
+import os
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent

@@ -99,6 +99,7 @@ def load_ohlcv(tickers: list[str], end_date: str, n_days: int = LOAD_DAYS) -> pd
           AND  date     <= ?
         ORDER  BY name, date
     """
+    # 기준일(as_of) 이후 데이터는 제외 — 과거 기준일 재실행 시 미래 데이터 혼입 방지
     with sqlite3.connect(str(DB_PATH)) as conn:
         df = pd.read_sql_query(sql, conn, params=tickers + [end_date])
 

@@ -80,7 +80,7 @@ def load_yaml(name: str) -> dict:
 
 
 def lseg_open():
-    cfg_path = os.getenv("LSEG_CONFIG_PATH", str(Path.home() / "lseg-data.config.json"))
+    cfg_path = str(BASE_DIR / (os.getenv("LSEG_CONFIG_PATH") or str(Path.home() / "lseg-data.config.json")))
     ld.open_session(config_name=cfg_path)
 
 

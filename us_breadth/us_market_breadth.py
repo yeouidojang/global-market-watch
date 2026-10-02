@@ -140,10 +140,12 @@ def load_from_db(tickers: list[str], n_days: int = N_DAYS) -> pd.DataFrame:
         WHERE  session  = 'us'
           AND  category = 'stock'
           AND  name     IN ({placeholders})
+          AND  date    <= ?
         ORDER  BY name, date
     """
+    # 기준일(TODAY) 이후 데이터 제외 — 과거 기준일 재실행 시 미래 데이터 혼입 방지
     conn = sqlite3.connect(str(DB_PATH))
-    df   = pd.read_sql_query(query, conn, params=tickers)
+    df   = pd.read_sql_query(query, conn, params=tickers + [TODAY])
     conn.close()
 
     if df.empty:
@@ -220,7 +222,8 @@ def download_from_yfinance(tickers: list[str], n_days: int = N_DAYS) -> pd.DataF
         single = len(batch) == 1
         for t in batch:
             try:
-                sub = (raw if single else raw[t]).dropna(subset=["Close"]).tail(n_days)
+                sub = (raw if single else raw[t]).dropna(subset=["Close"])
+                sub = sub[sub.index <= pd.Timestamp(TODAY)].tail(n_days)
                 if sub.empty:
                     continue
                 for dt, row in sub.iterrows():

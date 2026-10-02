@@ -120,6 +120,11 @@ class DBManager:
                     PRIMARY KEY (ticker, fetched_date)
                 )
             """)
+            # 구버전 DB에는 eps_chg_1m/eps_chg_3m 컬럼이 없을 수 있음 → 이관 전 보강
+            old_cols = [r[1] for r in conn.execute("PRAGMA table_info(eps_cache_old)").fetchall()]
+            for col in ("eps_chg_1m", "eps_chg_3m"):
+                if col not in old_cols:
+                    conn.execute(f"ALTER TABLE eps_cache_old ADD COLUMN {col} REAL")
             conn.execute("""
                 INSERT INTO eps_cache (ticker, eps_chg_1m, eps_chg_1w, eps_chg_3m, fetched_date, created_at)
                 SELECT ticker, eps_chg_1m, eps_chg_1w, eps_chg_3m, fetched_date, created_at FROM eps_cache_old
